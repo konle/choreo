@@ -35,6 +35,7 @@ export function defaultParallelInnerTemplate(kind: ParallelInnerKind): TaskTempl
           retry_count: 0,
           retry_delay: 3,
           response_format: null,
+          form: [],
         },
       }
     case 'Grpc':

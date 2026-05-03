@@ -111,6 +111,7 @@ export interface LlmTemplate {
   retry_count: number
   retry_delay: number
   response_format: LlmResponseFormat | null
+  form: FormField[]
 }
 
 export type TaskTemplate =

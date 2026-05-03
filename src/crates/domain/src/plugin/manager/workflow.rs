@@ -596,17 +596,36 @@ pub fn resolved_llm_request_snapshot(
     tpl: &crate::task::entity::task_definition::LlmTemplate,
     ctx: &serde_json::Value,
 ) -> serde_json::Value {
+    use crate::task::http_template_resolve::{resolve_form_to_json, resolve_template_placeholders, merge_ctx_with_task_form_layer};
+
+    // Resolve form defaults against base ctx (Variable types get {{}} substituted),
+    // then merge with REVERSED priority compared to HTTP:
+    //   HTTP:  effective_ctx = merge(ctx, form_layer)   → form overrides ctx (task hard config)
+    //   LLM:   effective_ctx = merge(form_layer, ctx)    → ctx overrides form (user input > defaults)
+    let form_layer: serde_json::Map<String, serde_json::Value> = tpl
+        .form
+        .iter()
+        .filter(|f| !f.key.trim().is_empty())
+        .map(|f| (f.key.clone(), resolve_form_to_json(f, ctx)))
+        .collect();
+
+    let effective_ctx = if form_layer.is_empty() {
+        ctx.clone()
+    } else {
+        merge_ctx_with_task_form_layer(&serde_json::Value::Object(form_layer.clone()), &ctx.as_object().cloned().unwrap_or_default())
+    };
+
     let system_prompt = tpl
         .system_prompt
         .as_deref()
-        .map(|s| resolve_template_placeholders(s, ctx))
+        .map(|s| resolve_template_placeholders(s, &effective_ctx))
         .unwrap_or_default();
-    let user_prompt = resolve_template_placeholders(&tpl.user_prompt, ctx);
-    let base_url = resolve_template_placeholders(&tpl.base_url, ctx);
-    let model = resolve_template_placeholders(&tpl.model, ctx);
+    let user_prompt = resolve_template_placeholders(&tpl.user_prompt, &effective_ctx);
+    let base_url = resolve_template_placeholders(&tpl.base_url, &effective_ctx);
+    let model = resolve_template_placeholders(&tpl.model, &effective_ctx);
 
     let api_key_ref = &tpl.api_key_ref;
-    let api_key = crate::task::http_template_resolve::get_by_path_pub(ctx, api_key_ref)
+    let api_key = crate::task::http_template_resolve::get_by_path_pub(&effective_ctx, api_key_ref)
         .and_then(|v| match v {
             serde_json::Value::String(s) => Some(s),
             _ => None,
@@ -625,6 +644,9 @@ pub fn resolved_llm_request_snapshot(
     });
     if !api_key.is_empty() {
         snapshot["_api_key"] = serde_json::Value::String(api_key);
+    }
+    if !form_layer.is_empty() {
+        snapshot["form"] = serde_json::Value::Object(form_layer);
     }
     snapshot
 }

@@ -62,7 +62,7 @@ pub fn resolve_template_placeholders(s: &str, ctx: &JsonValue) -> String {
     out
 }
 
-fn resolve_form_to_json(form: &Form, ctx: &JsonValue) -> JsonValue {
+pub fn resolve_form_to_json(form: &Form, ctx: &JsonValue) -> JsonValue {
     match form.value_type {
         FormValueType::Variable => match &form.value {
             FormValue::String(s) => {
@@ -101,7 +101,7 @@ fn resolve_form_to_json(form: &Form, ctx: &JsonValue) -> JsonValue {
 }
 
 /// `base` object extended with `layer` entries; **layer overwrites** existing keys (task `form` wins).
-fn merge_ctx_with_task_form_layer(base: &JsonValue, layer: &Map<String, JsonValue>) -> JsonValue {
+pub fn merge_ctx_with_task_form_layer(base: &JsonValue, layer: &Map<String, JsonValue>) -> JsonValue {
     if layer.is_empty() {
         return base.clone();
     }
@@ -353,5 +353,136 @@ mod tests {
         let ctx = json!({ "password": "from_instance" });
         let snap = resolved_http_request_snapshot(&template, &ctx);
         assert_eq!(snap["body"]["password"], json!("from_form"));
+    }
+
+    // --- LLM form resolution tests ---
+    // LLM form priority is REVERSED vs HTTP: ctx (user/workflow input) overrides form defaults.
+
+    use crate::plugin::manager::resolved_llm_request_snapshot;
+    use crate::task::entity::task_definition::LlmTemplate;
+
+    fn llm_tpl_with_form(user_prompt: &str, form: Vec<Form>) -> LlmTemplate {
+        LlmTemplate {
+            base_url: "http://localhost:11434/v1".to_string(),
+            model: "test-model".to_string(),
+            api_key_ref: "".to_string(),
+            system_prompt: None,
+            user_prompt: user_prompt.to_string(),
+            temperature: None,
+            max_tokens: None,
+            timeout: 30,
+            retry_count: 0,
+            retry_delay: 0,
+            response_format: None,
+            form,
+        }
+    }
+
+    fn llm_tpl_with_form_and_url(base_url: &str, user_prompt: &str, form: Vec<Form>) -> LlmTemplate {
+        LlmTemplate {
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            api_key_ref: "".to_string(),
+            system_prompt: None,
+            user_prompt: user_prompt.to_string(),
+            temperature: None,
+            max_tokens: None,
+            timeout: 30,
+            retry_count: 0,
+            retry_delay: 0,
+            response_format: None,
+            form,
+        }
+    }
+
+    #[test]
+    fn llm_form_fills_missing_ctx_keys() {
+        let tpl = llm_tpl_with_form(
+            "Translate from {{source_lang}} to {{target_lang}}: {{text}}",
+            vec![
+                form("source_lang", FormValue::String("中文".into()), FormValueType::String),
+                form("target_lang", FormValue::String("英文".into()), FormValueType::String),
+                form("text", FormValue::String("你好".into()), FormValueType::String),
+            ],
+        );
+        let ctx = json!({ "AI_GATEWAY": "192.168.1.1:11434" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        assert_eq!(snap["user_prompt"], json!("Translate from 中文 to 英文: 你好"));
+    }
+
+    #[test]
+    fn llm_ctx_overrides_form_defaults() {
+        let tpl = llm_tpl_with_form(
+            "Translate: {{text}}",
+            vec![
+                form("text", FormValue::String("默认文本".into()), FormValueType::String),
+            ],
+        );
+        let ctx = json!({ "text": "用户实际输入" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        assert_eq!(snap["user_prompt"], json!("Translate: 用户实际输入"));
+        // form snapshot shows default value (resolved against base ctx)
+        assert_eq!(snap["form"]["text"], json!("默认文本"));
+    }
+
+    #[test]
+    fn llm_form_variable_type_resolves_against_base_ctx() {
+        let tpl = llm_tpl_with_form(
+            "{{greeting}}",
+            vec![
+                form("greeting", FormValue::String("Hello {{name}}".into()), FormValueType::Variable),
+            ],
+        );
+        let ctx = json!({ "name": "World" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        // Variable type form row resolves {{name}} against ctx, producing "Hello World"
+        // Then {{greeting}} in prompt resolves against effective_ctx where greeting="Hello World"
+        assert_eq!(snap["user_prompt"], json!("Hello World"));
+        assert_eq!(snap["form"]["greeting"], json!("Hello World"));
+    }
+
+    #[test]
+    fn llm_form_variable_references_ctx_then_used_in_prompt() {
+        let tpl = llm_tpl_with_form(
+            "请翻译: {{text}}",
+            vec![
+                form("text", FormValue::String("{{text2}}".into()), FormValueType::Variable),
+            ],
+        );
+        let ctx = json!({ "text2": "你是美国人吗?" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        // form Variable type: {{text2}} resolves to "你是美国人吗?"
+        // ctx has no "text" key, so form default fills in
+        // effective_ctx = { text2: "你是美国人吗?", text: "你是美国人吗?" }
+        // prompt: {{text}} → "你是美国人吗?"
+        assert_eq!(snap["user_prompt"], json!("请翻译: 你是美国人吗?"));
+    }
+
+    #[test]
+    fn llm_empty_form_acts_as_plain_template() {
+        let tpl = llm_tpl_with_form("Hello {{name}}", vec![]);
+        let ctx = json!({ "name": "World" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        assert_eq!(snap["user_prompt"], json!("Hello World"));
+        assert!(snap.get("form").is_none());
+    }
+
+    #[test]
+    fn llm_ctx_key_takes_priority_over_form_default() {
+        // Exact scenario from the bug: workflow context has text2 and AI_GATEWAY,
+        // form has text={{text2}} (Variable type), and source_lang/target_lang from form defaults
+        let tpl = llm_tpl_with_form_and_url(
+            "http://{{AI_GATEWAY}}/v1",
+            "请将下列文本从{{source_lang}}翻译为{{target_lang}}: {{text}}",
+            vec![
+                form("source_lang", FormValue::String("中文".into()), FormValueType::String),
+                form("target_lang", FormValue::String("日文".into()), FormValueType::String),
+                form("text", FormValue::String("{{text2}}".into()), FormValueType::Variable),
+            ],
+        );
+        let ctx = json!({ "AI_GATEWAY": "192.168.50.18:11434", "text2": "你是美国人吗?" });
+        let snap = resolved_llm_request_snapshot(&tpl, &ctx);
+        assert_eq!(snap["user_prompt"], json!("请将下列文本从中文翻译为日文: 你是美国人吗?"));
+        assert_eq!(snap["base_url"], json!("http://192.168.50.18:11434/v1"));
     }
 }

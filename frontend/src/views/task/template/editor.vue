@@ -207,6 +207,30 @@
                 <a-textarea v-model="llmConfig.user_prompt" :auto-size="{ minRows: 3, maxRows: 12 }" placeholder="必填。实际任务指令" />
               </a-form-item>
 
+              <a-divider>用户表单定义</a-divider>
+              <a-alert type="info" style="margin-bottom: 16px">
+                此处定义的字段将在独立执行时展示给用户填写，值可通过 <code>{<!-- -->{key}}</code> 在 System Prompt / User Prompt 中引用。
+              </a-alert>
+              <a-form-item label="Form (用户输入字段)">
+                <div class="form-list">
+                  <div v-for="(f, idx) in llmConfig.form" :key="idx" class="form-row">
+                    <a-input v-model="f.key" placeholder="字段名 (key)" style="width: 160px" />
+                    <a-input v-model="f.value" placeholder="默认值 (可选)" style="flex: 1" />
+                    <a-select v-model="f.type" style="width: 120px">
+                      <a-option value="String">String</a-option>
+                      <a-option value="Number">Number</a-option>
+                      <a-option value="Bool">Bool</a-option>
+                      <a-option value="Json">Json</a-option>
+                    </a-select>
+                    <a-input v-model="f.description" placeholder="字段说明" style="width: 200px" />
+                    <a-button status="danger" @click="llmConfig.form.splice(idx, 1)">
+                      <template #icon><icon-delete /></template>
+                    </a-button>
+                  </div>
+                  <a-button type="dashed" long @click="llmConfig.form.push({ key: '', value: '', type: 'String', description: '' })">+ 添加表单字段</a-button>
+                </div>
+              </a-form-item>
+
               <a-divider>模型参数</a-divider>
               <a-row :gutter="16">
                 <a-col :span="8">
@@ -482,6 +506,7 @@ const llmConfig = reactive({
   retry_count: 0,
   retry_delay: 3,
   response_format: null as string | null,
+  form: [] as FormRow[],
 })
 
 const approvalConfig = reactive({
@@ -571,6 +596,7 @@ function buildTaskTemplate() {
         retry_count: llmConfig.retry_count,
         retry_delay: llmConfig.retry_delay,
         response_format: llmConfig.response_format || null,
+        form: toFormFields(llmConfig.form),
       },
     }
   }
@@ -721,6 +747,11 @@ const execFormDefs = computed<ExecFormDef[]>(() => {
       .filter(f => f.key.trim())
       .map(f => ({ key: f.key, type: f.type, defaultValue: f.value, description: f.description }))
   }
+  if (form.task_type === 'Llm') {
+    return llmConfig.form
+      .filter(f => f.key.trim())
+      .map(f => ({ key: f.key, type: f.type, defaultValue: f.value, description: f.description }))
+  }
   return []
 })
 
@@ -801,6 +832,7 @@ onMounted(async () => {
         llmConfig.retry_count = tpl.retry_count
         llmConfig.retry_delay = tpl.retry_delay
         llmConfig.response_format = tpl.response_format
+        llmConfig.form = formFieldsToRows(tpl.form)
       } else if (entity.task_type === 'Approval' && typeof entity.task_template === 'object' && 'Approval' in entity.task_template) {
         const tpl = entity.task_template.Approval
         approvalConfig.title = tpl.title

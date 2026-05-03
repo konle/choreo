@@ -105,6 +105,8 @@ pub struct LlmTemplate {
     pub retry_count: u32,
     pub retry_delay: u32,
     pub response_format: Option<LlmResponseFormat>,
+    #[serde(default)]
+    pub form: Vec<Form>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
