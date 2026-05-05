@@ -6,6 +6,7 @@
         <a-tag v-if="versionStatus" :color="versionStatus === 'Draft' ? 'gray' : versionStatus === 'Published' ? 'green' : 'orange'">{{ versionStatus }}</a-tag>
       </span>
       <a-space>
+        <a-button v-if="!readonly" @click="handleAutoLayout" :disabled="nodes.length === 0">自动布局</a-button>
         <a-button v-if="!readonly" type="primary" @click="handleSave" :loading="saving">保存</a-button>
         <a-tag v-if="readonly" color="orange">只读模式（已发布版本不可编辑）</a-tag>
       </a-space>
@@ -787,6 +788,27 @@ async function handleSave() {
     if (!versionStatus.value) versionStatus.value = 'Draft'
     Notification.success({ content: '保存成功' })
   } catch {} finally { saving.value = false }
+}
+
+// ---- Auto Layout ----
+
+function handleAutoLayout() {
+  if (nodes.value.length === 0) return
+  const g = new dagre.graphlib.Graph()
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 })
+  g.setDefaultEdgeLabel(() => ({}))
+  for (const n of nodes.value) {
+    g.setNode(n.id, { width: 160, height: 44 })
+  }
+  for (const e of edges.value) {
+    g.setEdge(e.source, e.target)
+  }
+  dagre.layout(g)
+  for (const n of nodes.value) {
+    const pos = g.node(n.id)
+    if (pos) n.position = { x: pos.x, y: pos.y }
+  }
+  pushSnapshot()
 }
 
 // ---- Load from entity ----
