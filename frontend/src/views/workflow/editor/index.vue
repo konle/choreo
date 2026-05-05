@@ -32,6 +32,7 @@
           v-model:nodes="nodes"
           v-model:edges="edges"
           :node-types="customNodeTypes as any"
+          :connect-on-click="false"
           @node-click="onNodeClick"
           @connect="onConnect"
           @edge-click="onEdgeClick"
@@ -803,7 +804,10 @@ async function loadFromEntity(entity: any) {
     }
   }
   dagre.layout(g)
-  nodeCounter = entity.nodes.length
+  nodeCounter = entity.nodes.reduce((max: number, n: any) => {
+    const m = n.node_id?.match(/^node_(\d+)$/)
+    return m ? Math.max(max, parseInt(m[1], 10)) : max
+  }, 0)
 
   nodes.value = entity.nodes.map((n: any) => {
     const pos = g.node(n.node_id)
