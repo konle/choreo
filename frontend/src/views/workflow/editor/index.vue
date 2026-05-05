@@ -793,7 +793,7 @@ async function handleSave() {
 
 async function loadFromEntity(entity: any) {
   const g = new dagre.graphlib.Graph()
-  g.setGraph({ rankdir: 'LR', nodesep: 60, ranksep: 100 })
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 })
   g.setDefaultEdgeLabel(() => ({}))
   for (const n of entity.nodes) {
     g.setNode(n.node_id, { width: 160, height: 44 })
