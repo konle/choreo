@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="instance-detail-page">
     <a-page-header :title="`工作流实例: ${instance?.workflow_instance_id || ''}`" @back="$router.push('/workflows/instances')">
       <template #extra>
         <a-space>
@@ -25,9 +25,9 @@
       <a-textarea v-model="childSkipOutputText" :auto-size="{ minRows: 6, maxRows: 16 }" placeholder="{}" />
     </a-modal>
 
-    <a-row :gutter="16">
+    <a-row :gutter="16" align="stretch" class="instance-detail-row">
       <a-col :span="6">
-        <a-card title="基本信息" :loading="loading" size="small">
+        <a-card title="基本信息" :loading="loading" size="small" style="height: 100%">
           <a-descriptions :column="1" size="small">
             <a-descriptions-item label="状态">
               <status-tag v-if="instance" :status="instance.status" :map="WORKFLOW_INSTANCE_STATUS_MAP" />
@@ -42,8 +42,8 @@
       </a-col>
 
       <a-col :span="12">
-        <a-card title="节点拓扑" size="small" style="height: 500px">
-          <div ref="flowContainer" style="width: 100%; height: 420px">
+        <a-card title="节点拓扑" size="small" class="topology-card">
+          <div ref="flowContainer" class="topology-flow-container">
             <VueFlow
               v-if="flowNodes.length"
               :nodes="flowNodes"
@@ -60,7 +60,7 @@
       </a-col>
 
       <a-col :span="6">
-        <a-card title="节点详情" size="small">
+        <a-card title="节点详情" size="small" style="height: 100%">
           <template v-if="selectedNode">
             <a-descriptions :column="1" size="small">
               <a-descriptions-item label="节点ID">{{ selectedNode.node_id }}</a-descriptions-item>
@@ -265,7 +265,7 @@ function collectEdges(nodes: WorkflowNodeInstanceEntity[]) {
 const flowNodes = computed(() => {
   if (!instance.value) return []
   const g = new dagre.graphlib.Graph()
-  g.setGraph({ rankdir: 'LR', nodesep: 50, ranksep: 80 })
+  g.setGraph({ rankdir: 'TB', nodesep: 60, ranksep: 100 })
   g.setDefaultEdgeLabel(() => ({}))
   for (const n of instance.value.nodes) {
     g.setNode(n.node_id, { width: 150, height: 40 })
@@ -561,6 +561,33 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.instance-detail-page {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 128px);
+}
+.instance-detail-row {
+  flex: 1;
+}
+
+.topology-card {
+  min-height: 500px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.topology-card :deep(.arco-card-body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.topology-flow-container {
+  width: 100%;
+  flex: 1;
+  min-height: 420px;
+}
+
 .node-context-hint {
   margin: 0 0 8px;
   font-size: 12px;
