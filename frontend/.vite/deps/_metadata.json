@@ -1,0 +1,38 @@
+{
+  "hash": "3f7e2944",
+  "configHash": "74199c5d",
+  "lockfileHash": "5cd983aa",
+  "browserHash": "fa54c598",
+  "optimized": {
+    "@arco-design/web-vue": {
+      "src": "../../node_modules/@arco-design/web-vue/es/index.js",
+      "file": "@arco-design_web-vue.js",
+      "fileHash": "163f66a6",
+      "needsInterop": false
+    },
+    "pinia": {
+      "src": "../../node_modules/pinia/dist/pinia.mjs",
+      "file": "pinia.js",
+      "fileHash": "e0463754",
+      "needsInterop": false
+    },
+    "vue-router": {
+      "src": "../../node_modules/vue-router/dist/vue-router.mjs",
+      "file": "vue-router.js",
+      "fileHash": "999eff0a",
+      "needsInterop": false
+    },
+    "vue": {
+      "src": "../../node_modules/vue/dist/vue.runtime.esm-bundler.js",
+      "file": "vue.js",
+      "fileHash": "48da1d93",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "vue.runtime.esm-bundler-CKUwx75R": {
+      "file": "vue.runtime.esm-bundler-CKUwx75R.js",
+      "isDynamicEntry": false
+    }
+  }
+}

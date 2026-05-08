@@ -182,6 +182,10 @@ async fn retry_node(
     let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
 
     if is_container {
+        // Container child retry is now event-based:
+        // The service already CAS-reset the child TaskInstance and the handler
+        // dispatches both the task execution and the RetryContainerChild event
+        // to the Workflow Worker (which safely rollbacks container state under lock).
         let cid = req.child_task_id.as_ref().unwrap();
         let item_index = cid
             .rsplit('-')
@@ -205,6 +209,22 @@ async fn retry_node(
             .await
             .map_err(|e| {
                 error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch child task retry");
+                ApiError::internal(e.to_string())
+            })?;
+
+        handler
+            .dispatcher
+            .dispatch_workflow(ExecuteWorkflowJob {
+                workflow_instance_id: updated.workflow_instance_id.clone(),
+                tenant_id: auth.tenant_id.clone(),
+                event: WorkflowEvent::RetryContainerChild {
+                    node_id: req.node_id.clone(),
+                    child_task_id: cid.clone(),
+                },
+            })
+            .await
+            .map_err(|e| {
+                error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch RetryContainerChild event");
                 ApiError::internal(e.to_string())
             })?;
 

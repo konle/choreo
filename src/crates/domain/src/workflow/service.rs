@@ -593,102 +593,29 @@ impl WorkflowInstanceService {
                 ));
             }
 
-            if !matches!(
+            if matches!(
                 inst.status,
-                WorkflowInstanceStatus::Failed | WorkflowInstanceStatus::Await
+                WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Canceled
             ) {
                 return Err(format!(
-                    "workflow instance must be Failed or Await to retry container child, got {:?}",
+                    "cannot retry container child: workflow is {:?}",
                     inst.status
                 ));
             }
 
-            let state = inst.nodes[idx]
-                .task_instance
-                .output
-                .as_ref()
-                .ok_or_else(|| "container node has no output state".to_string())?;
-
-            let child_status = state
-                .get("results")
-                .and_then(|r| r.get(cid))
-                .and_then(|e| e.get("status"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            if child_status != "Failed" {
-                return Err(format!(
-                    "child_task_id '{}' status is '{}', only Failed children can be retried",
-                    cid, child_status
-                ));
-            }
-
-            // Update container output state
-            let state = inst.nodes[idx]
-                .task_instance
-                .output
-                .as_mut()
-                .unwrap();
-
-            // Remove from processed_callbacks
-            if let Some(arr) = state.get_mut("processed_callbacks").and_then(|v| v.as_array_mut()) {
-                arr.retain(|v| v.as_str() != Some(cid));
-            }
-
-            // Decrement failed_count
-            if let Some(fc) = state.get_mut("failed_count").and_then(|v| v.as_u64()) {
-                state["failed_count"] = serde_json::json!(fc.saturating_sub(1));
-            }
-
-            // Reset results entry to null (pending re-dispatch)
-            if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
-                results.insert(cid.to_string(), serde_json::json!(null));
-            }
-
-            // CAS reset independent task_instance: Failed → Pending
+            // CAS reset child TaskInstance: Failed → Pending
+            // Dispatching (task execution + RetryContainerChild event) is handled by the caller (API handler)
             if let Err(e) = self.task_instance_svc.retry_instance(cid).await {
-                warn!(child_task_id = %cid, error = %e, "failed to CAS reset task_instance for retry");
-                return Err(format!("failed to reset task_instance status: {}", e));
+                return Err(format!(
+                    "child task '{}' cannot be retried (not Failed or CAS conflict): {}",
+                    cid, e
+                ));
             }
             // Clear task_instance output/error but preserve input (resolved HTTP snapshot)
             if let Ok(mut ti) = self.task_instance_svc.get_task_instance_entity(cid.to_string()).await {
                 ti.output = None;
                 ti.error_message = None;
                 let _ = self.task_instance_svc.update_task_instance_entity(ti).await;
-            }
-
-            // Transition workflow: Failed → Pending (unified event protocol)
-            if inst.status == WorkflowInstanceStatus::Failed {
-                let transition_result = inst
-                    .transition_status(WorkflowInstanceStatus::Pending)
-                    .map_err(|e| e)?;
-                self.save_workflow_instance(&inst)
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                // Dispatch outbound events (ChildRevived to grandparent)
-                for job in transition_result.into_dispatch_jobs() {
-                    if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
-                        warn!(workflow_instance_id = %workflow_instance_id, error = %e,
-                            "failed to dispatch outbound ChildRevived event for container child retry");
-                    }
-                }
-
-                // Dispatch Start to self to re-enter execution loop (plugin re-evaluation)
-                if let Err(e) = self.dispatcher.dispatch_workflow(
-                    crate::shared::job::ExecuteWorkflowJob {
-                        workflow_instance_id: workflow_instance_id.to_string(),
-                        tenant_id: inst.tenant_id.clone(),
-                        event: crate::shared::job::WorkflowEvent::Start,
-                    }
-                ).await {
-                    warn!(workflow_instance_id = %workflow_instance_id, error = %e,
-                        "failed to dispatch Start for container child retry re-evaluation");
-                }
-            } else {
-                inst.updated_at = Utc::now();
-                self.save_workflow_instance(&inst)
-                    .await
-                    .map_err(|e| e.to_string())?;
             }
 
             return self

@@ -93,6 +93,15 @@ impl PluginManager {
                 self.on_child_revived(&job.workflow_instance_id, &mut instance, &node_id, &child_id)
                     .await
             }
+            WorkflowEvent::RetryContainerChild { node_id, child_task_id } => {
+                self.on_retry_container_child(
+                    &job.workflow_instance_id,
+                    &mut instance,
+                    &node_id,
+                    &child_task_id,
+                )
+                .await
+            }
         };
 
         if let Err(e) = self
@@ -370,6 +379,134 @@ impl PluginManager {
                 results.insert(child_id.to_string(), serde_json::Value::Null);
             }
         }
+    }
+
+    /// Handle RetryContainerChild event: rollback container state and recover parent status.
+    ///
+    /// Executed by Worker under lock. The child TaskInstance has already been reset to Pending
+    /// and dispatched by the API layer. This handler only modifies the parent workflow instance.
+    async fn on_retry_container_child(
+        &self,
+        workflow_instance_id: &str,
+        instance: &mut WorkflowInstanceEntity,
+        node_id: &str,
+        child_task_id: &str,
+    ) -> anyhow::Result<()> {
+        let node = instance
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == node_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("RetryContainerChild: node {} not found", node_id)
+            })?;
+
+        Self::rollback_child_in_container(node, child_task_id);
+
+        match instance.status {
+            WorkflowInstanceStatus::Failed => {
+                let node = instance
+                    .nodes
+                    .iter_mut()
+                    .find(|n| n.node_id == node_id)
+                    .unwrap();
+                node.status = crate::workflow::entity::workflow_definition::NodeExecutionStatus::Pending;
+                node.error_message = None;
+
+                let transition_result = instance
+                    .transition_status(WorkflowInstanceStatus::Pending)
+                    .map_err(|e| anyhow::anyhow!("RetryContainerChild transition: {}", e))?;
+
+                self.save_instance_and_bump_epoch(instance).await?;
+
+                for job in transition_result.into_dispatch_jobs() {
+                    if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                        warn!(
+                            workflow_instance_id = %workflow_instance_id,
+                            error = %e,
+                            "RetryContainerChild: failed to dispatch ChildRevived to grandparent"
+                        );
+                    }
+                }
+
+                info!(
+                    workflow_instance_id = %workflow_instance_id,
+                    node_id = %node_id,
+                    child_task_id = %child_task_id,
+                    "RetryContainerChild: Failed→Pending, dispatching Start"
+                );
+                self.dispatcher
+                    .dispatch_workflow(crate::shared::job::ExecuteWorkflowJob {
+                        workflow_instance_id: workflow_instance_id.to_string(),
+                        tenant_id: instance.tenant_id.clone(),
+                        event: crate::shared::job::WorkflowEvent::Start,
+                    })
+                    .await?;
+            }
+            WorkflowInstanceStatus::Await
+            | WorkflowInstanceStatus::Pending
+            | WorkflowInstanceStatus::Running => {
+                self.save_instance_and_bump_epoch(instance).await?;
+                debug!(
+                    workflow_instance_id = %workflow_instance_id,
+                    node_id = %node_id,
+                    child_task_id = %child_task_id,
+                    status = ?instance.status,
+                    "RetryContainerChild: rollback only (parent not Failed)"
+                );
+            }
+            _ => {
+                debug!(
+                    workflow_instance_id = %workflow_instance_id,
+                    status = ?instance.status,
+                    "RetryContainerChild ignored: terminal state"
+                );
+            }
+        }
+
+        // Proactive check: if the child task already finished (extreme timing),
+        // supplement the callback that may have been lost
+        let child_result = match &self.task_instance_svc {
+            Some(svc) => svc.get_task_instance_entity(child_task_id.to_string()).await.ok(),
+            None => None,
+        };
+        if let Some(child) = child_result {
+            use crate::shared::workflow::TaskInstanceStatus;
+            let terminal_status = match child.task_status {
+                TaskInstanceStatus::Completed => Some(
+                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success,
+                ),
+                TaskInstanceStatus::Failed => Some(
+                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed,
+                ),
+                _ => None,
+            };
+
+            if let Some(status) = terminal_status {
+                info!(
+                    workflow_instance_id = %workflow_instance_id,
+                    child_task_id = %child_task_id,
+                    child_status = ?child.task_status,
+                    "RetryContainerChild: child already terminal, supplementing callback"
+                );
+                let _ = self
+                    .dispatcher
+                    .dispatch_workflow(crate::shared::job::ExecuteWorkflowJob {
+                        workflow_instance_id: workflow_instance_id.to_string(),
+                        tenant_id: instance.tenant_id.clone(),
+                        event: crate::shared::job::WorkflowEvent::NodeCallback {
+                            node_id: node_id.to_string(),
+                            child_task_id: child_task_id.to_string(),
+                            status,
+                            output: child.output,
+                            error_message: child.error_message,
+                            input: child.input,
+                        },
+                    })
+                    .await;
+            }
+        }
+
+        Ok(())
     }
 
     /// Transitions workflow instance from Await/Suspended/Pending into a state where callbacks apply; reloads when needed.
@@ -769,4 +906,176 @@ pub fn resolved_llm_request_snapshot(
         snapshot["form"] = serde_json::Value::Object(form_layer);
     }
     snapshot
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::workflow::TaskType;
+    use crate::task::entity::task_definition::{TaskInstanceEntity, TaskTemplate};
+    use crate::workflow::entity::workflow_definition::{
+        NodeExecutionStatus, WorkflowNodeInstanceEntity,
+    };
+
+    fn make_container_node(
+        node_id: &str,
+        failed_count: u64,
+        success_count: u64,
+        processed: Vec<&str>,
+        results: serde_json::Value,
+    ) -> WorkflowNodeInstanceEntity {
+        let state = serde_json::json!({
+            "total_items": 2,
+            "dispatched_count": 2,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "skipped_count": 0,
+            "processed_callbacks": processed,
+            "results": results,
+        });
+        WorkflowNodeInstanceEntity {
+            node_id: node_id.to_string(),
+            node_type: TaskType::Parallel,
+            task_instance: TaskInstanceEntity {
+                id: format!("{}-task", node_id),
+                tenant_id: "t".to_string(),
+                task_id: "".to_string(),
+                task_name: "".to_string(),
+                task_type: TaskType::Parallel,
+                task_template: TaskTemplate::Parallel(
+                    crate::task::entity::task_definition::ParallelTemplate {
+                        items_path: "items".to_string(),
+                        item_alias: "item".to_string(),
+                        task_template: Box::new(TaskTemplate::Http(
+                            crate::task::entity::task_definition::TaskHttpTemplate {
+                                url: "http://x".to_string(),
+                                method: crate::task::entity::task_definition::HttpMethod::Get,
+                                headers: vec![],
+                                body: vec![],
+                                form: vec![],
+                                retry_count: 0,
+                                retry_delay: 0,
+                                timeout: 30,
+                                success_condition: None,
+                            },
+                        )),
+                        concurrency: 10,
+                        mode: crate::task::entity::task_definition::ParallelMode::Rolling,
+                        max_failures: Some(2),
+                    },
+                ),
+                task_status: crate::shared::workflow::TaskInstanceStatus::Pending,
+                task_instance_id: format!("{}-task", node_id),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                deleted_at: None,
+                input: None,
+                output: Some(state),
+                error_message: None,
+                execution_duration: None,
+                caller_context: None,
+            },
+            context: serde_json::json!({}),
+            next_node: None,
+            status: NodeExecutionStatus::Failed,
+            error_message: Some("Parallel aborted".to_string()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_rollback_child_in_container_decrements_failed_count() {
+        let mut node = make_container_node(
+            "node_6",
+            2,
+            0,
+            vec!["wf-node_6-0", "wf-node_6-1"],
+            serde_json::json!({
+                "wf-node_6-0": {"status": "Failed", "output": null, "error": "err0"},
+                "wf-node_6-1": {"status": "Failed", "output": null, "error": "err1"},
+            }),
+        );
+
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-0");
+
+        let state = node.task_instance.output.as_ref().unwrap();
+        assert_eq!(state["failed_count"], 1);
+        assert_eq!(state["results"]["wf-node_6-0"], serde_json::Value::Null);
+        let processed: Vec<String> = state["processed_callbacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(!processed.contains(&"wf-node_6-0".to_string()));
+        assert!(processed.contains(&"wf-node_6-1".to_string()));
+    }
+
+    #[test]
+    fn test_rollback_child_in_container_idempotent() {
+        let mut node = make_container_node(
+            "node_6",
+            2,
+            0,
+            vec!["wf-node_6-0", "wf-node_6-1"],
+            serde_json::json!({
+                "wf-node_6-0": {"status": "Failed", "output": null, "error": "err0"},
+                "wf-node_6-1": {"status": "Failed", "output": null, "error": "err1"},
+            }),
+        );
+
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-0");
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-0");
+
+        let state = node.task_instance.output.as_ref().unwrap();
+        assert_eq!(state["failed_count"], 1);
+    }
+
+    #[test]
+    fn test_rollback_child_not_in_processed_is_noop() {
+        let mut node = make_container_node(
+            "node_6",
+            1,
+            1,
+            vec!["wf-node_6-1"],
+            serde_json::json!({
+                "wf-node_6-0": {"status": "Success", "output": {"ok": true}},
+                "wf-node_6-1": {"status": "Failed", "output": null, "error": "err"},
+            }),
+        );
+
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-99");
+
+        let state = node.task_instance.output.as_ref().unwrap();
+        assert_eq!(state["failed_count"], 1);
+        assert_eq!(state["success_count"], 1);
+    }
+
+    #[test]
+    fn test_rollback_two_children_sequentially() {
+        let mut node = make_container_node(
+            "node_6",
+            2,
+            0,
+            vec!["wf-node_6-0", "wf-node_6-1"],
+            serde_json::json!({
+                "wf-node_6-0": {"status": "Failed", "output": null, "error": "err0"},
+                "wf-node_6-1": {"status": "Failed", "output": null, "error": "err1"},
+            }),
+        );
+
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-0");
+        PluginManager::rollback_child_in_container(&mut node, "wf-node_6-1");
+
+        let state = node.task_instance.output.as_ref().unwrap();
+        assert_eq!(state["failed_count"], 0);
+        let processed: Vec<String> = state["processed_callbacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(processed.is_empty());
+    }
 }

@@ -16,6 +16,10 @@ pub enum WorkflowEvent {
         node_id: String,
         child_id: String,
     },
+    RetryContainerChild {
+        node_id: String,
+        child_task_id: String,
+    },
 }
 
 impl Default for WorkflowEvent {
