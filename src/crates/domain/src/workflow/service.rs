@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde_json::Value as JsonValue;
 use tracing::{info, warn};
 use uuid::Uuid;
-use crate::shared::job::WorkflowCallerContext;
+use crate::shared::job::{WorkflowCallerContext, ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher};
 use crate::shared::workflow::{TaskInstanceStatus, TaskType, WorkflowInstanceStatus, WorkflowStatus};
 use crate::task::entity::task_definition::TaskInstanceEntity;
 use crate::task::service::TaskInstanceService;
@@ -14,6 +14,20 @@ use crate::workflow::entity::workflow_definition::{
 };
 use common::pagination::PaginatedData;
 use crate::workflow::repository::{RepositoryError, WorkflowDefinitionRepository, WorkflowInstanceRepository};
+
+/// A no-op dispatcher that discards all dispatch calls.
+/// Used as a default when no real dispatcher is configured (e.g. in apiserver which doesn't need dispatch).
+struct NoopDispatcher;
+
+#[async_trait::async_trait]
+impl TaskDispatcher for NoopDispatcher {
+    async fn dispatch_task(&self, _job: ExecuteTaskJob) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn dispatch_workflow(&self, _job: ExecuteWorkflowJob) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct WorkflowDefinitionService {
@@ -110,6 +124,7 @@ impl WorkflowDefinitionService {
 pub struct WorkflowInstanceService {
     pub repository: Arc<dyn WorkflowInstanceRepository>,
     pub task_instance_svc: Arc<TaskInstanceService>,
+    pub dispatcher: Arc<dyn crate::shared::job::TaskDispatcher>,
 }
 
 impl WorkflowInstanceService {
@@ -117,7 +132,16 @@ impl WorkflowInstanceService {
         repository: Arc<dyn WorkflowInstanceRepository>,
         task_instance_svc: Arc<TaskInstanceService>,
     ) -> Self {
-        Self { repository, task_instance_svc }
+        Self {
+            repository,
+            task_instance_svc,
+            dispatcher: Arc::new(NoopDispatcher),
+        }
+    }
+
+    pub fn with_dispatcher(mut self, dispatcher: Arc<dyn crate::shared::job::TaskDispatcher>) -> Self {
+        self.dispatcher = dispatcher;
+        self
     }
 
     pub async fn get_workflow_instance(&self, id: String) -> Result<WorkflowInstanceEntity, RepositoryError> {
@@ -632,14 +656,40 @@ impl WorkflowInstanceService {
                 let _ = self.task_instance_svc.update_task_instance_entity(ti).await;
             }
 
-            // Transition workflow: Failed → Await
+            // Transition workflow: Failed → Pending (unified event protocol)
             if inst.status == WorkflowInstanceStatus::Failed {
-                inst.status = WorkflowInstanceStatus::Await;
+                let transition_result = inst
+                    .transition_status(WorkflowInstanceStatus::Pending)
+                    .map_err(|e| e)?;
+                self.save_workflow_instance(&inst)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                // Dispatch outbound events (ChildRevived to grandparent)
+                for job in transition_result.into_dispatch_jobs() {
+                    if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                        warn!(workflow_instance_id = %workflow_instance_id, error = %e,
+                            "failed to dispatch outbound ChildRevived event for container child retry");
+                    }
+                }
+
+                // Dispatch Start to self to re-enter execution loop (plugin re-evaluation)
+                if let Err(e) = self.dispatcher.dispatch_workflow(
+                    crate::shared::job::ExecuteWorkflowJob {
+                        workflow_instance_id: workflow_instance_id.to_string(),
+                        tenant_id: inst.tenant_id.clone(),
+                        event: crate::shared::job::WorkflowEvent::Start,
+                    }
+                ).await {
+                    warn!(workflow_instance_id = %workflow_instance_id, error = %e,
+                        "failed to dispatch Start for container child retry re-evaluation");
+                }
+            } else {
+                inst.updated_at = Utc::now();
+                self.save_workflow_instance(&inst)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
-            inst.updated_at = Utc::now();
-            self.save_workflow_instance(&inst)
-                .await
-                .map_err(|e| e.to_string())?;
 
             return self
                 .get_workflow_instance(workflow_instance_id.to_string())
@@ -675,12 +725,21 @@ impl WorkflowInstanceService {
         inst.nodes[idx].task_instance.error_message = None;
         inst.nodes[idx].updated_at = Utc::now();
 
-        inst.status = WorkflowInstanceStatus::Pending;
-        inst.updated_at = Utc::now();
+        let transition_result = inst
+            .transition_status(WorkflowInstanceStatus::Pending)
+            .map_err(|e| e)?;
 
         self.save_workflow_instance(&inst)
             .await
             .map_err(|e| e.to_string())?;
+
+        // Dispatch outbound events (ChildRevived to parent if this is a child workflow)
+        for job in transition_result.into_dispatch_jobs() {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                warn!(workflow_instance_id = %workflow_instance_id, error = %e,
+                    "failed to dispatch outbound ChildRevived event");
+            }
+        }
 
         self.get_workflow_instance(workflow_instance_id.to_string())
             .await

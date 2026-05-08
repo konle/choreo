@@ -122,4 +122,19 @@ impl PluginExecutor for PluginManager {
             )
             .await
     }
+
+    async fn is_task_still_failed(&self, task_instance_id: &str) -> bool {
+        let Some(ref task_svc) = self.task_instance_svc else {
+            return true; // conservative: no service available
+        };
+        match task_svc.get_task_instance_entity(task_instance_id.to_string()).await {
+            Ok(task) => {
+                matches!(
+                    task.task_status,
+                    crate::shared::workflow::TaskInstanceStatus::Failed
+                )
+            }
+            Err(_) => true,
+        }
+    }
 }

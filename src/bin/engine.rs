@@ -43,29 +43,47 @@ use domain::task::executors::http::HttpTaskExecutor;
 use domain::task::executors::llm::LlmTaskExecutor;
 use domain::task::manager::TaskManager;
 
-fn build_node_callback(
+/// Build a workflow callback job from a task execution result.
+/// Uses the unified `should_notify_parent_task` logic to determine events.
+fn build_outbound_for_task(
     job: &ExecuteTaskJob,
-    status: NodeExecutionStatus,
+    old_status: &domain::shared::workflow::TaskInstanceStatus,
+    new_status: &domain::shared::workflow::TaskInstanceStatus,
     output: Option<serde_json::Value>,
     error_message: Option<String>,
     input: Option<serde_json::Value>,
-) -> ExecuteWorkflowJob {
-    let caller = job
-        .caller_context
-        .as_ref()
-        .expect("caller_context must be present when building node callback");
-    ExecuteWorkflowJob {
+) -> Option<ExecuteWorkflowJob> {
+    use domain::task::entity::transition::{should_notify_parent_task, TaskChildEventKind, TaskTerminalStatus};
+
+    let event_kind = should_notify_parent_task(old_status, new_status)?;
+    let caller = job.caller_context.as_ref()?;
+
+    let event = match event_kind {
+        TaskChildEventKind::Terminated(terminal) => {
+            let status = match terminal {
+                TaskTerminalStatus::Completed => NodeExecutionStatus::Success,
+                TaskTerminalStatus::Failed => NodeExecutionStatus::Failed,
+            };
+            WorkflowEvent::NodeCallback {
+                node_id: caller.node_id.clone(),
+                child_task_id: job.task_instance_id.clone(),
+                status,
+                output,
+                error_message,
+                input,
+            }
+        }
+        TaskChildEventKind::Revived => WorkflowEvent::ChildRevived {
+            node_id: caller.node_id.clone(),
+            child_id: job.task_instance_id.clone(),
+        },
+    };
+
+    Some(ExecuteWorkflowJob {
         workflow_instance_id: caller.workflow_instance_id.clone(),
         tenant_id: job.tenant_id.clone(),
-        event: WorkflowEvent::NodeCallback {
-            node_id: caller.node_id.clone(),
-            child_task_id: job.task_instance_id.clone(),
-            status,
-            output,
-            error_message,
-            input,
-        },
-    }
+        event,
+    })
 }
 
 async fn handle_task_job(
@@ -86,6 +104,8 @@ async fn handle_task_job(
     };
     let start = Instant::now(); // 记录开始时间
 
+    let old_task_status = domain::shared::workflow::TaskInstanceStatus::Running;
+
     let exec_result = match task_manager.execute_task(&task_instance_entity).await {
         Ok(r) => r,
         Err(e) => {
@@ -100,29 +120,27 @@ async fn handle_task_job(
                 warn!(task_instance_id = %job.task_instance_id, error = %cas_err, "CAS fail_with_error failed (may already be terminal)");
             }
 
-            if let Some(caller) = job.caller_context.as_ref() {
-                let callback = build_node_callback(&job, NodeExecutionStatus::Failed, None, Some(e.to_string()), None);
-                manager
-                    .dispatcher()
-                    .dispatch_workflow(callback)
-                    .await
-                    .map_err(|dispatch_err| {
-                        error!(
-                            task_instance_id = %job.task_instance_id,
-                            workflow_instance_id = %caller.workflow_instance_id,
-                            error = %dispatch_err,
-                            "failed to dispatch workflow callback"
-                        );
-                        std::io::Error::other(dispatch_err)
-                    })?;
+            let new_status = domain::shared::workflow::TaskInstanceStatus::Failed;
+            if let Some(outbound) = build_outbound_for_task(
+                &job, &old_task_status, &new_status, None, Some(e.to_string()), None,
+            ) {
+                if let Err(dispatch_err) = manager.dispatcher().dispatch_workflow(outbound).await {
+                    error!(
+                        task_instance_id = %job.task_instance_id,
+                        error = %dispatch_err,
+                        "failed to dispatch outbound event to parent"
+                    );
+                    return Err(std::io::Error::other(dispatch_err));
+                }
             }
 
             return Ok(());
         }
     };
     let execution_duration = start.elapsed().as_millis() as u64;
-    // CAS finalize: Running → Completed or Running → Failed
-    match exec_result.status {
+
+    // Determine new task status
+    let new_task_status = match exec_result.status {
         NodeExecutionStatus::Success => {
             if let Err(e) = task_svc.complete_with_output(
                 &job.task_instance_id,
@@ -132,14 +150,16 @@ async fn handle_task_job(
             ).await {
                 warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
             }
+            domain::shared::workflow::TaskInstanceStatus::Completed
         }
         _ => {
             let error_msg = exec_result.error_message.clone().unwrap_or_default();
             if let Err(e) = task_svc.fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration)).await {
                 warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
             }
+            domain::shared::workflow::TaskInstanceStatus::Failed
         }
-    }
+    };
 
     info!(
         task_instance_id = %job.task_instance_id,
@@ -147,27 +167,23 @@ async fn handle_task_job(
         "task completed"
     );
 
-    if let Some(caller) = job.caller_context.as_ref() {
-        let callback = build_node_callback(
-            &job,
-            exec_result.status,
-            exec_result.output,
-            exec_result.error_message,
-            exec_result.input,
-        );
-        manager
-            .dispatcher()
-            .dispatch_workflow(callback)
-            .await
-            .map_err(|e| {
-                error!(
-                    task_instance_id = %job.task_instance_id,
-                    workflow_instance_id = %caller.workflow_instance_id,
-                    error = %e,
-                    "failed to dispatch workflow callback"
-                );
-                std::io::Error::other(e)
-            })?;
+    // Dispatch outbound event to parent workflow using unified transition logic
+    if let Some(outbound) = build_outbound_for_task(
+        &job,
+        &old_task_status,
+        &new_task_status,
+        exec_result.output,
+        exec_result.error_message,
+        exec_result.input,
+    ) {
+        if let Err(e) = manager.dispatcher().dispatch_workflow(outbound).await {
+            error!(
+                task_instance_id = %job.task_instance_id,
+                error = %e,
+                "failed to dispatch outbound event to parent"
+            );
+            return Err(std::io::Error::other(e));
+        }
     }
 
     Ok(())

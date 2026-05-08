@@ -12,6 +12,10 @@ pub enum WorkflowEvent {
         error_message: Option<String>,
         input: Option<serde_json::Value>,
     },
+    ChildRevived {
+        node_id: String,
+        child_id: String,
+    },
 }
 
 impl Default for WorkflowEvent {

@@ -43,6 +43,23 @@ impl PluginInterface for ForkJoinPlugin {
             }
         };
 
+        // Re-evaluation: if state already exists (dispatched_count > 0), this is a re-entry
+        if let Some(ref state) = node_instance.task_instance.output {
+            let dispatched = state.get("dispatched_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            if dispatched > 0 {
+                debug!(
+                    node_id = %node_instance.node_id,
+                    "forkjoin: re-evaluation — children already dispatched, returning Await"
+                );
+                return Ok(ExecutionResult {
+                    status: NodeExecutionStatus::Await,
+                    dispatch_jobs: vec![],
+                    dispatch_workflow_jobs: vec![],
+                    jump_to_node: None,
+                });
+            }
+        }
+
         if template.tasks.is_empty() {
             debug!(node_id = %node_instance.node_id, "forkjoin: empty tasks, completing immediately");
             return Ok(ExecutionResult::success(None));
@@ -207,6 +224,56 @@ impl PluginInterface for ForkJoinPlugin {
         let mode = template.mode.clone();
 
         let max_failures = template.max_failures;
+
+        // Stale Failure Check: verify previously-failed children are actually still failed.
+        if failed_count > 0 {
+            if let Some(results_obj) = state.get("results").and_then(|r| r.as_object()) {
+                let failed_task_ids: Vec<(String, String)> = results_obj
+                    .iter()
+                    .filter(|(_, v)| {
+                        v.get("status")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "Failed")
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|(task_key, _)| {
+                        // Resolve task_key back to child_task_id
+                        template.tasks.iter().position(|t| t.task_key == *task_key).map(|idx| {
+                            let cid = format!(
+                                "{}-{}-{}",
+                                workflow_instance.workflow_instance_id,
+                                node_instance.node_id,
+                                idx
+                            );
+                            (task_key.clone(), cid)
+                        })
+                    })
+                    .filter(|(_, cid)| cid != child_task_id)
+                    .collect();
+
+                let mut stale_count = 0u64;
+                for (task_key, cid) in &failed_task_ids {
+                    if !_executor.is_task_still_failed(cid).await {
+                        stale_count += 1;
+                        if let Some(arr) = state.get_mut("processed_callbacks").and_then(|v| v.as_array_mut()) {
+                            arr.retain(|v| v.as_str() != Some(cid.as_str()));
+                        }
+                        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
+                            results.insert(task_key.clone(), serde_json::Value::Null);
+                        }
+                    }
+                }
+                if stale_count > 0 {
+                    failed_count = failed_count.saturating_sub(stale_count);
+                    debug!(
+                        node_id = %node_instance.node_id,
+                        stale_count = stale_count,
+                        new_failed_count = failed_count,
+                        "forkjoin: stale failure check reconciled counters"
+                    );
+                }
+            }
+        }
 
         // max_failures: early-abort threshold only.
         //   Some(n) → abort as soon as failed_count >= n

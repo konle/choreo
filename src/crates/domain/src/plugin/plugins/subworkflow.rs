@@ -40,6 +40,60 @@ impl PluginInterface for SubWorkflowPlugin {
             }
         };
 
+        // Re-evaluation: check if a child workflow instance already exists
+        if let Some(existing_child_id) = node_instance
+            .task_instance
+            .output
+            .as_ref()
+            .and_then(|o| o.get("child_workflow_instance_id"))
+            .and_then(|v| v.as_str())
+        {
+            match self.instance_svc.get_workflow_instance(existing_child_id.to_string()).await {
+                Ok(child) => {
+                    use crate::shared::workflow::WorkflowInstanceStatus;
+                    use crate::workflow::entity::workflow_definition::NodeExecutionStatus;
+                    return match child.status {
+                        WorkflowInstanceStatus::Completed => {
+                            info!(
+                                parent_workflow_id = %workflow_instance.workflow_instance_id,
+                                child_workflow_id = %existing_child_id,
+                                "sub-workflow re-evaluation: child already completed"
+                            );
+                            node_instance.task_instance.output = Some(serde_json::json!({
+                                "child_workflow_instance_id": existing_child_id,
+                            }));
+                            Ok(ExecutionResult::success(None))
+                        }
+                        WorkflowInstanceStatus::Failed => {
+                            info!(
+                                parent_workflow_id = %workflow_instance.workflow_instance_id,
+                                child_workflow_id = %existing_child_id,
+                                "sub-workflow re-evaluation: child still failed"
+                            );
+                            Ok(ExecutionResult::failed())
+                        }
+                        _ => {
+                            info!(
+                                parent_workflow_id = %workflow_instance.workflow_instance_id,
+                                child_workflow_id = %existing_child_id,
+                                child_status = ?child.status,
+                                "sub-workflow re-evaluation: child still running, awaiting callback"
+                            );
+                            Ok(ExecutionResult {
+                                status: NodeExecutionStatus::Await,
+                                dispatch_jobs: vec![],
+                                dispatch_workflow_jobs: vec![],
+                                jump_to_node: None,
+                            })
+                        }
+                    };
+                }
+                Err(_) => {
+                    // Child instance not found — fall through to create a new one
+                }
+            }
+        }
+
         let child_depth = workflow_instance.depth + 1;
         if child_depth > MAX_SUB_WORKFLOW_DEPTH {
             error!(

@@ -14,7 +14,7 @@ use crate::shared::job::{ExecuteWorkflowJob, WorkflowEvent};
 use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
 use crate::task::entity::task_definition::TaskTemplate;
 use crate::task::http_template_resolve::{resolved_http_request_snapshot, resolve_template_placeholders};
-use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity};
+use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
 use crate::workflow::resolution_context::augment_merged_context_with_nodes;
 use tracing::{debug, error, info, warn};
 
@@ -89,17 +89,11 @@ impl PluginManager {
                 )
                 .await
             }
-        };
-
-        if result.is_ok() {
-            if let Err(e) = self.notify_parent_if_needed(&job.workflow_instance_id).await {
-                warn!(
-                    workflow_instance_id = %job.workflow_instance_id,
-                    error = %e,
-                    "failed to notify parent workflow"
-                );
+            WorkflowEvent::ChildRevived { node_id, child_id } => {
+                self.on_child_revived(&job.workflow_instance_id, &mut instance, &node_id, &child_id)
+                    .await
             }
-        }
+        };
 
         if let Err(e) = self
             .workflow_instance_svc
@@ -210,6 +204,171 @@ impl PluginManager {
         match action {
             LoopAction::Advance | LoopAction::Retry => self.execute_workflow_loop(&mut instance).await,
             LoopAction::Done => Ok(()),
+        }
+    }
+
+    async fn on_child_revived(
+        &self,
+        workflow_instance_id: &str,
+        instance: &mut WorkflowInstanceEntity,
+        node_id: &str,
+        child_id: &str,
+    ) -> anyhow::Result<()> {
+        use crate::shared::workflow::WorkflowInstanceStatus;
+
+        match instance.status {
+            WorkflowInstanceStatus::Failed => {
+                self.revive_from_failed(workflow_instance_id, instance, node_id, child_id)
+                    .await
+            }
+            WorkflowInstanceStatus::Await => {
+                self.revive_from_await(instance, node_id, child_id).await
+            }
+            _ => {
+                debug!(
+                    workflow_instance_id = %workflow_instance_id,
+                    node_id = %node_id,
+                    child_id = %child_id,
+                    status = ?instance.status,
+                    "ChildRevived ignored: parent not in Failed/Await"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn revive_from_failed(
+        &self,
+        workflow_instance_id: &str,
+        instance: &mut WorkflowInstanceEntity,
+        node_id: &str,
+        child_id: &str,
+    ) -> anyhow::Result<()> {
+        use crate::shared::workflow::WorkflowInstanceStatus;
+        use crate::workflow::entity::workflow_definition::NodeExecutionStatus;
+
+        let node_index = instance
+            .nodes
+            .iter()
+            .position(|n| n.node_id == node_id)
+            .ok_or_else(|| anyhow::anyhow!("revive_from_failed: node not found: {}", node_id))?;
+
+        let node = &mut instance.nodes[node_index];
+        let is_container = matches!(
+            node.node_type,
+            crate::shared::workflow::TaskType::Parallel
+                | crate::shared::workflow::TaskType::ForkJoin
+        );
+
+        if is_container {
+            Self::rollback_child_in_container(node, child_id);
+        }
+
+        node.status = NodeExecutionStatus::Pending;
+        node.error_message = None;
+
+        let transition_result = instance
+            .transition_status(WorkflowInstanceStatus::Pending)
+            .map_err(|e| anyhow::anyhow!("revive_from_failed transition error: {}", e))?;
+
+        self.save_instance_and_bump_epoch(instance).await?;
+
+        // Dispatch outbound events (Revived to grandparent if this is also a child workflow)
+        for job in transition_result.into_dispatch_jobs() {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                warn!(
+                    workflow_instance_id = %workflow_instance_id,
+                    error = %e,
+                    "failed to dispatch outbound ChildRevived to grandparent"
+                );
+            }
+        }
+
+        // Dispatch Start to self to re-enter execution loop
+        info!(
+            workflow_instance_id = %workflow_instance_id,
+            node_id = %node_id,
+            child_id = %child_id,
+            "revive_from_failed: dispatching Start to self"
+        );
+        self.dispatcher
+            .dispatch_workflow(crate::shared::job::ExecuteWorkflowJob {
+                workflow_instance_id: workflow_instance_id.to_string(),
+                tenant_id: instance.tenant_id.clone(),
+                event: crate::shared::job::WorkflowEvent::Start,
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    async fn revive_from_await(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_id: &str,
+        child_id: &str,
+    ) -> anyhow::Result<()> {
+        let node_index = instance
+            .nodes
+            .iter()
+            .position(|n| n.node_id == node_id)
+            .ok_or_else(|| anyhow::anyhow!("revive_from_await: node not found: {}", node_id))?;
+
+        let node = &mut instance.nodes[node_index];
+        let is_container = matches!(
+            node.node_type,
+            crate::shared::workflow::TaskType::Parallel
+                | crate::shared::workflow::TaskType::ForkJoin
+        );
+
+        if is_container {
+            Self::rollback_child_in_container(node, child_id);
+            self.save_instance_and_bump_epoch(instance).await?;
+        }
+
+        debug!(
+            workflow_instance_id = %instance.workflow_instance_id,
+            node_id = %node_id,
+            child_id = %child_id,
+            "revive_from_await: container rollback done, staying in Await"
+        );
+
+        Ok(())
+    }
+
+    fn rollback_child_in_container(
+        node: &mut WorkflowNodeInstanceEntity,
+        child_id: &str,
+    ) {
+        let Some(ref mut state) = node.task_instance.output else {
+            return;
+        };
+
+        // Remove from processed_callbacks
+        if let Some(arr) = state.get_mut("processed_callbacks").and_then(|v| v.as_array_mut()) {
+            arr.retain(|v| v.as_str() != Some(child_id));
+        }
+
+        // Check if the child was previously recorded as Failed in results
+        let was_failed = state
+            .get("results")
+            .and_then(|r| r.get(child_id))
+            .and_then(|e| e.get("status"))
+            .and_then(|s| s.as_str())
+            .map(|s| s == "Failed")
+            .unwrap_or(false);
+
+        if was_failed {
+            if let Some(fc) = state.get("failed_count").and_then(|v| v.as_u64()) {
+                state["failed_count"] = serde_json::json!(fc.saturating_sub(1));
+            }
+        }
+
+        // Reset results entry
+        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
+            if results.contains_key(child_id) {
+                results.insert(child_id.to_string(), serde_json::Value::Null);
+            }
         }
     }
 
@@ -437,10 +596,13 @@ impl PluginManager {
                         workflow_instance_id = %instance.workflow_instance_id,
                         "workflow completed"
                     );
+                    let old_status = instance.status.clone();
                     self.workflow_instance_svc
                         .complete_instance(&instance.workflow_instance_id)
                         .await
                         .map_err(|e| anyhow::anyhow!(e))?;
+                    instance.status = WorkflowInstanceStatus::Completed;
+                    self.dispatch_outbound_for_transition(instance, &old_status).await;
                     Ok(LoopOutcome::Stop)
                 }
             }
@@ -450,10 +612,13 @@ impl PluginManager {
                     node_id = %current_node_id,
                     "workflow failed at node"
                 );
+                let old_status = instance.status.clone();
                 self.workflow_instance_svc
                     .fail_instance(&instance.workflow_instance_id)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
+                instance.status = WorkflowInstanceStatus::Failed;
+                self.dispatch_outbound_for_transition(instance, &old_status).await;
                 Ok(LoopOutcome::Stop)
             }
             NodeExecutionStatus::Suspended | NodeExecutionStatus::Await | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
@@ -545,51 +710,6 @@ impl PluginManager {
         self.apply_exec_result(instance, node_index, exec_result).await
     }
 
-    async fn notify_parent_if_needed(&self, workflow_instance_id: &str) -> anyhow::Result<()> {
-        let instance = self
-            .workflow_instance_svc
-            .get_workflow_instance(workflow_instance_id.to_string())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        let is_terminal = matches!(
-            instance.status,
-            WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Failed
-        );
-
-        if !is_terminal {
-            return Ok(());
-        }
-
-        if let Some(parent_ctx) = &instance.parent_context {
-            let status = match instance.status {
-                WorkflowInstanceStatus::Completed => NodeExecutionStatus::Success,
-                _ => NodeExecutionStatus::Failed,
-            };
-            info!(
-                child_workflow_id = %workflow_instance_id,
-                parent_workflow_id = %parent_ctx.workflow_instance_id,
-                status = ?status,
-                "notifying parent workflow"
-            );
-            self.dispatcher
-                .dispatch_workflow(ExecuteWorkflowJob {
-                    workflow_instance_id: parent_ctx.workflow_instance_id.clone(),
-                    tenant_id: instance.tenant_id.clone(),
-                    event: WorkflowEvent::NodeCallback {
-                        node_id: parent_ctx.node_id.clone(),
-                        child_task_id: instance.workflow_instance_id.clone(),
-                        status,
-                        output: Some(instance.context.clone()),
-                        error_message: None,
-                        input: None,
-                    },
-                })
-                .await?;
-        }
-
-        Ok(())
-    }
 }
 
 pub fn resolved_llm_request_snapshot(

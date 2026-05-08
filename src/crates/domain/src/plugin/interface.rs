@@ -106,4 +106,12 @@ pub trait PluginExecutor: Send + Sync {
         error_message: &Option<String>,
         input: &Option<serde_json::Value>,
     ) -> anyhow::Result<ExecutionResult>;
+
+    /// Check if a task instance is still in Failed state.
+    /// Used by container plugins for Stale Failure Check.
+    /// Returns true if the task is still Failed, false otherwise (retried/completed/not found).
+    async fn is_task_still_failed(&self, task_instance_id: &str) -> bool {
+        let _ = task_instance_id;
+        true // default: assume still failed (conservative)
+    }
 }
