@@ -408,7 +408,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         let update = doc! {
             "$set": {
                 "status": to_bson,
-                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?,
             }
         };
 
@@ -426,7 +426,6 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
 
         Ok(result)
     }
-
     async fn acquire_lock(
         &self,
         workflow_instance_id: &str,
@@ -434,13 +433,15 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         duration_ms: u64,
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
         let now = chrono::Utc::now();
+        let now_bson = mongodb::bson::to_bson(&now).map_err(|e| format!("serialize now: {e}"))?;
         let expiration = now - chrono::Duration::milliseconds(duration_ms as i64);
+        let expiration_bson = mongodb::bson::to_bson(&expiration).map_err(|e| format!("serialize expiration: {e}"))?;
 
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "$or": [
-                { "locked_by": mongodb::bson::Bson::Null },
-                { "locked_at": { "$lt": expiration.to_rfc3339() } }
+                { "locked_at": mongodb::bson::Bson::Null },
+                { "locked_at": { "$lt": expiration_bson } }
             ]
         };
 
@@ -448,8 +449,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
             "$set": {
                 "locked_by": worker_id,
                 "locked_duration": duration_ms as i64,
-                "locked_at": now.to_rfc3339(),
-                "updated_at": now.to_rfc3339(),
+                "locked_at": now_bson.clone(),
+                "updated_at": now_bson,
             },
             "$inc": { "epoch": 1 }
         };
@@ -473,10 +474,14 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         &self,
         workflow_instance_id: &str,
         worker_id: &str,
+        expected_epoch: u64,
     ) -> Result<(), RepositoryError> {
+        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?;
+
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "locked_by": worker_id,
+            "epoch": expected_epoch as i64,
         };
 
         let update_doc = doc! {
@@ -484,7 +489,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
                 "locked_by": mongodb::bson::Bson::Null,
                 "locked_duration": mongodb::bson::Bson::Null,
                 "locked_at": mongodb::bson::Bson::Null,
-                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": now_bson,
             },
             "$inc": { "epoch": 1 }
         };
@@ -496,7 +501,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
 
         if result.matched_count == 0 {
             return Err(format!(
-                "failed to release lock for instance {} (not held by {})",
+                "failed to release lock for instance {} (not held by {} or epoch mismatch)",
                 workflow_instance_id, worker_id
             )
             .into());
@@ -570,7 +575,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         &self,
         limit: u32,
     ) -> Result<Vec<WorkflowInstanceEntity>, RepositoryError> {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now();
+        let now_bson = mongodb::bson::to_bson(&now).map_err(|e| format!("serialize now: {e}"))?;
         let status_running = mongodb::bson::to_bson(&WorkflowInstanceStatus::Running)
             .map_err(|e| format!("serialize Running: {e}"))?;
         let status_await = mongodb::bson::to_bson(&WorkflowInstanceStatus::Await)
@@ -583,11 +589,11 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
                 { "$expr": {
                     "$lt": [
                         { "$dateAdd": {
-                            "startDate": { "$dateFromString": { "dateString": "$locked_at" } },
+                            "startDate": "$locked_at",
                             "unit": "millisecond",
                             "amount": "$locked_duration"
                         }},
-                        { "$dateFromString": { "dateString": &now } }
+                        now_bson
                     ]
                 }}
             ]
@@ -611,6 +617,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         workflow_instance_id: &str,
         expected_epoch: u64,
     ) -> Result<(), RepositoryError> {
+        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?;
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "epoch": expected_epoch as i64,
@@ -620,7 +627,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
                 "locked_by": mongodb::bson::Bson::Null,
                 "locked_at": mongodb::bson::Bson::Null,
                 "locked_duration": mongodb::bson::Bson::Null,
-                "updated_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": now_bson,
             },
             "$inc": { "epoch": 1 }
         };

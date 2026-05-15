@@ -106,7 +106,7 @@ impl PluginManager {
 
         if let Err(e) = self
             .workflow_instance_svc
-            .release_lock(&job.workflow_instance_id, worker_id)
+            .release_lock(&job.workflow_instance_id, worker_id, instance.epoch)
             .await
         {
             warn!(
