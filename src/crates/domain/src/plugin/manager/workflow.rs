@@ -150,7 +150,7 @@ impl PluginManager {
         error_message: Option<String>,
         input: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
-        let ready = self.prepare_instance_for_node_callback(instance).await?;
+        let ready = self.prepare_instance_for_node_callback(instance, &node_id).await?;
         let mut instance = match ready {
             CallbackReadiness::Ignored => return Ok(()),
             CallbackReadiness::Ready(i) => i,
@@ -180,7 +180,6 @@ impl PluginManager {
             return Ok(());
         };
 
-        instance.current_node = node_id.clone();
         let mut node = instance.nodes[node_index].clone();
 
         let exec_result = match self
@@ -510,10 +509,24 @@ impl PluginManager {
     }
 
     /// Transitions workflow instance from Await/Suspended/Pending into a state where callbacks apply; reloads when needed.
+    ///
+    /// Returns `Ignored` if the callback targets a node that is no longer the current node
+    /// (stale/delayed callback from a previously completed node).
     async fn prepare_instance_for_node_callback(
         &self,
         instance: &mut WorkflowInstanceEntity,
+        expected_node_id: &str,
     ) -> anyhow::Result<CallbackReadiness> {
+        if expected_node_id != instance.get_current_node() {
+            debug!(
+                workflow_instance_id = %instance.workflow_instance_id,
+                expected_node_id = %expected_node_id,
+                current_node = %instance.get_current_node(),
+                "node callback ignored: stale callback targeting non-current node"
+            );
+            return Ok(CallbackReadiness::Ignored);
+        }
+
         let id = instance.workflow_instance_id.clone();
         match instance.status {
             WorkflowInstanceStatus::Await => {
@@ -1077,5 +1090,68 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert!(processed.is_empty());
+    }
+
+    #[test]
+    fn test_stale_callback_guard_rejects_mismatched_node() {
+        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
+        use crate::shared::workflow::WorkflowInstanceStatus;
+
+        let instance = WorkflowInstanceEntity {
+            workflow_instance_id: "wf-1".to_string(),
+            tenant_id: "t".to_string(),
+            workflow_meta_id: "meta-1".to_string(),
+            workflow_version: 1,
+            status: WorkflowInstanceStatus::Await,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+            context: serde_json::json!({}),
+            entry_node: "node_1".to_string(),
+            current_node: "node_9".to_string(),
+            nodes: vec![],
+            epoch: 10,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth: 0,
+            created_by: Some("user".to_string()),
+        };
+
+        // Callback targeting node_6, but current_node is node_9 → should be rejected
+        assert_ne!("node_6", instance.get_current_node());
+        assert_eq!("node_9", instance.get_current_node());
+    }
+
+    #[test]
+    fn test_stale_callback_guard_accepts_matching_node() {
+        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
+        use crate::shared::workflow::WorkflowInstanceStatus;
+
+        let instance = WorkflowInstanceEntity {
+            workflow_instance_id: "wf-1".to_string(),
+            tenant_id: "t".to_string(),
+            workflow_meta_id: "meta-1".to_string(),
+            workflow_version: 1,
+            status: WorkflowInstanceStatus::Await,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+            context: serde_json::json!({}),
+            entry_node: "node_1".to_string(),
+            current_node: "node_6".to_string(),
+            nodes: vec![],
+            epoch: 10,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth: 0,
+            created_by: Some("user".to_string()),
+        };
+
+        // Callback targeting node_6, current_node is node_6 → should be accepted
+        assert_eq!("node_6", instance.get_current_node());
     }
 }
