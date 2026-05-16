@@ -68,6 +68,7 @@ impl PluginManager {
         };
 
         let result = match job.event {
+            // 工作流启动执行事件是Start。async fn execute_instance(
             WorkflowEvent::Start => self.on_workflow_start(&job.workflow_instance_id, &mut instance).await,
             WorkflowEvent::NodeCallback {
                 node_id,
@@ -124,11 +125,14 @@ impl PluginManager {
         workflow_instance_id: &str,
         instance: &mut WorkflowInstanceEntity,
     ) -> anyhow::Result<()> {
-        if !instance.is_pending() && !instance.is_running() {
+        // NOTE: 只允许 Pending 状态进入 Start 路径。Running 的 NACK 重试不再放行，
+        // 僵尸 Running 实例由 Sweeper 扫描恢复。
+        // 原始 guard 为 !is_pending() && !is_running()，移除了 is_running() 分支。
+        if !instance.is_pending() {
             debug!(
                 workflow_instance_id = %workflow_instance_id,
                 status = ?instance.status,
-                "start ignored: instance not in pending/running"
+                "start ignored: instance not in pending"
             );
             return Ok(());
         }
@@ -639,9 +643,18 @@ impl PluginManager {
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
             }
-            WorkflowInstanceStatus::Running => {
-                // Idempotent Start: retried Start jobs may see Running already — continue the loop.
-            }
+            // NOTE: Running case 已被注释掉。
+            //
+            // 原因：此分支依赖消息队列的 NACK 重试机制（Worker 崩溃后事件重新入队，
+            // 新 Worker 看到实例已是 Running 时跳过 Pending→Running 转换直接进入循环）。
+            // 但工作流引擎在设计之初并没有对消息队列重试做假设，Correctness 应该
+            // 只依赖 Sweeper 兜底（锁过期 → 扫描僵尸 → 强制回退 Pending → 投递 Start）。
+            // 移除此分支后，NACK 重投递的 Start 事件命中 Running 实例会走到 _ 分支
+            // 被安全忽略，由 Sweeper 延迟恢复（默认 60 秒扫描间隔）。
+            //
+            // WorkflowInstanceStatus::Running => {
+            //     // Idempotent Start: retried Start jobs may see Running already — continue the loop.
+            // }
             _ => {
                 debug!(
                     workflow_instance_id = %workflow_instance.workflow_instance_id,
