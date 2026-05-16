@@ -249,6 +249,7 @@ impl WorkflowInstanceService {
 
     /// Core state transfer: validates the transition against the state machine,
     /// then delegates to the repository for CAS update.
+    /// Returns the updated entity (with epoch incremented by the DB).
     async fn transfer_status(
         &self,
         workflow_instance_id: &str,
@@ -266,7 +267,34 @@ impl WorkflowInstanceService {
             .await
     }
 
+    /// Transition instance status in DB and sync the in-memory entity.
+    ///
+    /// This is the Worker-friendly variant that automatically syncs
+    /// `status`, `epoch`, and `updated_at` on the in-memory instance,
+    /// preventing callers from forgetting to keep epoch in sync.
+    /// Returns the old status for outbound event dispatch.
+    pub async fn transition_instance(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        to: WorkflowInstanceStatus,
+    ) -> Result<WorkflowInstanceStatus, RepositoryError> {
+        let old_status = instance.status.clone();
+        let updated = self.transfer_status(
+            &instance.workflow_instance_id,
+            &instance.status,
+            &to,
+        ).await?;
+        instance.status = to;
+        instance.epoch = updated.epoch;
+        instance.updated_at = updated.updated_at;
+        Ok(old_status)
+    }
+
     /// Pending -> Running
+    ///
+    /// Prefer `transition_instance` in Worker contexts where you hold `&mut WorkflowInstanceEntity`,
+    /// which automatically syncs `status`, `epoch`, and `updated_at` in memory.
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn start_instance(
         &self,
         workflow_instance_id: &str,
@@ -279,6 +307,7 @@ impl WorkflowInstanceService {
     }
 
     /// Running -> Completed
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn complete_instance(
         &self,
         workflow_instance_id: &str,
@@ -291,6 +320,7 @@ impl WorkflowInstanceService {
     }
 
     /// Running -> Failed
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn fail_instance(
         &self,
         workflow_instance_id: &str,
@@ -303,6 +333,7 @@ impl WorkflowInstanceService {
     }
 
     /// Running -> Suspended (e.g. approval node awaiting external action)
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn suspend_instance(
         &self,
         workflow_instance_id: &str,
@@ -315,6 +346,7 @@ impl WorkflowInstanceService {
     }
 
     /// Running -> Await (yield CPU and wait for async callback)
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn await_instance(
         &self,
         workflow_instance_id: &str,
@@ -365,6 +397,7 @@ impl WorkflowInstanceService {
     }
 
     /// Await -> Pending (callback received, ready to be scheduled again)
+    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
     pub async fn wake_from_await(
         &self,
         workflow_instance_id: &str,

@@ -401,6 +401,9 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         let to_bson = mongodb::bson::to_bson(to_status)
             .map_err(|e| format!("serialize to_status: {e}"))?;
 
+        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now())
+            .map_err(|e| format!("serialize now: {e}"))?;
+
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "status": from_bson,
@@ -408,8 +411,9 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         let update = doc! {
             "$set": {
                 "status": to_bson,
-                "updated_at": mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?,
-            }
+                "updated_at": now_bson,
+            },
+            "$inc": { "epoch": 1 }
         };
 
         let result = self

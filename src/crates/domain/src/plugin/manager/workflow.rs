@@ -531,50 +531,37 @@ impl PluginManager {
             return Ok(CallbackReadiness::Ignored);
         }
 
-        let id = instance.workflow_instance_id.clone();
         match instance.status {
             WorkflowInstanceStatus::Await => {
                 self.workflow_instance_svc
-                    .wake_from_await(&id)
+                    .transition_instance(instance, WorkflowInstanceStatus::Pending)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.workflow_instance_svc
-                    .start_instance(&id)
+                    .transition_instance(instance, WorkflowInstanceStatus::Running)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                *instance = self
-                    .workflow_instance_svc
-                    .get_workflow_instance(id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
+
                 Ok(CallbackReadiness::Ready(instance.clone()))
             }
             WorkflowInstanceStatus::Suspended => {
                 self.workflow_instance_svc
-                    .resume_instance(&id)
+                    .transition_instance(instance, WorkflowInstanceStatus::Pending)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.workflow_instance_svc
-                    .start_instance(&id)
+                    .transition_instance(instance, WorkflowInstanceStatus::Running)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                *instance = self
-                    .workflow_instance_svc
-                    .get_workflow_instance(id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
+
                 Ok(CallbackReadiness::Ready(instance.clone()))
             }
             WorkflowInstanceStatus::Pending => {
                 self.workflow_instance_svc
-                    .start_instance(&id)
+                    .transition_instance(instance, WorkflowInstanceStatus::Running)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                *instance = self
-                    .workflow_instance_svc
-                    .get_workflow_instance(id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
+
                 Ok(CallbackReadiness::Ready(instance.clone()))
             }
             WorkflowInstanceStatus::Running => Ok(CallbackReadiness::Ready(instance.clone())),
@@ -639,7 +626,7 @@ impl PluginManager {
         match latest.status {
             WorkflowInstanceStatus::Pending => {
                 self.workflow_instance_svc
-                    .start_instance(&workflow_instance.workflow_instance_id)
+                    .transition_instance(workflow_instance, WorkflowInstanceStatus::Running)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
             }
@@ -759,12 +746,10 @@ impl PluginManager {
                         workflow_instance_id = %instance.workflow_instance_id,
                         "workflow completed"
                     );
-                    let old_status = instance.status.clone();
-                    self.workflow_instance_svc
-                        .complete_instance(&instance.workflow_instance_id)
+                    let old_status = self.workflow_instance_svc
+                        .transition_instance(instance, WorkflowInstanceStatus::Completed)
                         .await
                         .map_err(|e| anyhow::anyhow!(e))?;
-                    instance.status = WorkflowInstanceStatus::Completed;
                     self.dispatch_outbound_for_transition(instance, &old_status).await;
                     Ok(LoopOutcome::Stop)
                 }
@@ -775,12 +760,10 @@ impl PluginManager {
                     node_id = %current_node_id,
                     "workflow failed at node"
                 );
-                let old_status = instance.status.clone();
-                self.workflow_instance_svc
-                    .fail_instance(&instance.workflow_instance_id)
+                let old_status = self.workflow_instance_svc
+                    .transition_instance(instance, WorkflowInstanceStatus::Failed)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                instance.status = WorkflowInstanceStatus::Failed;
                 self.dispatch_outbound_for_transition(instance, &old_status).await;
                 Ok(LoopOutcome::Stop)
             }
