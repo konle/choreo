@@ -6,7 +6,7 @@ use axum::{
 };
 use tracing::{info, error};
 use domain::{
-    shared::{job::{ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext, WorkflowEvent}, workflow::{TaskType, WorkflowStatus}},
+    shared::{job::{ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext, WorkflowEvent}, workflow::{TaskType, WorkflowInstanceStatus, WorkflowStatus}},
     user::entity::Permission,
     workflow::entity::query::WorkflowInstanceQuery,
 };
@@ -128,11 +128,17 @@ async fn execute_instance(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
-    let updated = handler.instance_service.start_instance(&id).await?;
+    let instance = handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
+
+    if instance.status != WorkflowInstanceStatus::Pending {
+        return Err(ApiError::bad_request(format!(
+            "workflow instance is not in Pending state (current: {:?})",
+            instance.status
+        )));
+    }
 
     handler.dispatcher.dispatch_workflow(ExecuteWorkflowJob {
-        workflow_instance_id: updated.workflow_instance_id.clone(),
+        workflow_instance_id: id.clone(),
         tenant_id: auth.tenant_id,
         event: WorkflowEvent::Start,
     }).await.map_err(|e| {
@@ -142,7 +148,7 @@ async fn execute_instance(
 
     info!(workflow_instance_id = %id, "workflow execution dispatched");
 
-    Ok(Json(Response::success(updated)))
+    Ok(Json(Response::success(instance)))
 }
 
 async fn cancel_instance(
