@@ -129,8 +129,14 @@ impl Sweeper {
         );
     }
 
-    /// Reset to Pending → Running → dispatch Start.
-    /// Leaf helper that never recurses into recover_await / recover_running.
+    /// Reset to Pending then dispatch Start.
+    ///
+    /// The Pending→Running transition is intentionally NOT done here.
+    /// Per the architecture convention, only a lock-holding Worker may
+    /// advance an instance to Running (inside `execute_workflow`). The
+    /// sweeper's responsibility ends at returning the instance to the
+    /// Pending safety boundary and queuing a Start event; the Worker
+    /// that picks up the event will perform the Pending→Running step.
     async fn restart_via_start(&self, instance: &WorkflowInstanceEntity) -> anyhow::Result<()> {
         let id = &instance.workflow_instance_id;
 
@@ -138,11 +144,6 @@ impl Sweeper {
             .transfer_status_unchecked(id, &WorkflowInstanceStatus::Pending)
             .await
             .map_err(|e| anyhow::anyhow!("→Pending failed: {e}"))?;
-
-        self.workflow_instance_svc
-            .start_instance(id)
-            .await
-            .map_err(|e| anyhow::anyhow!("Pending→Running failed: {e}"))?;
 
         self.dispatcher
             .dispatch_workflow(ExecuteWorkflowJob {
