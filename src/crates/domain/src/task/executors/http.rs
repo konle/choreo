@@ -114,9 +114,11 @@ impl HttpTaskExecutor {
         attempt: u32,
         condition: Option<(&str, bool)>,
     ) -> serde_json::Value {
+        let body_val = serde_json::from_str::<serde_json::Value>(resp_body)
+            .unwrap_or(serde_json::Value::String(resp_body.to_string()));
         let mut output = json!({
             "status_code": status_code,
-            "body": resp_body,
+            "body": body_val,
             "duration_ms": duration_ms,
             "attempt": attempt + 1,
         });
