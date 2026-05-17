@@ -53,7 +53,6 @@ pub trait WorkflowInstanceRepository: Send + Sync {
         &self,
         workflow_instance_id: &str,
         worker_id: &str,
-        expected_epoch: u64,
     ) -> Result<(), RepositoryError>;
 
     async fn create_workflow_instance(

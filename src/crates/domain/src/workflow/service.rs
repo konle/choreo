@@ -236,8 +236,8 @@ impl WorkflowInstanceService {
         self.repository.acquire_lock(workflow_instance_id, worker_id, duration_ms).await
     }
 
-    pub async fn release_lock(&self, workflow_instance_id: &str, worker_id: &str, expected_epoch: u64) -> Result<(), RepositoryError> {
-        self.repository.release_lock(workflow_instance_id, worker_id, expected_epoch).await
+    pub async fn release_lock(&self, workflow_instance_id: &str, worker_id: &str) -> Result<(), RepositoryError> {
+        self.repository.release_lock(workflow_instance_id, worker_id).await
     }
 
     pub async fn save_workflow_instance(&self, instance: &WorkflowInstanceEntity) -> Result<(), RepositoryError> {

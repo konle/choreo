@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value as JsonValue, json};
 use tracing::{debug, error};
 
-use crate::plugin::interface::{ChildStatus, ExecutionResult, PluginExecutor, PluginInterface};
+use crate::plugin::interface::{ChildStatus, ContainerGatherResult, ExecutionResult, PluginExecutor, PluginInterface, should_abort};
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowCallerContext};
 use crate::task::entity::task_definition::{ParallelMode, TaskTemplate};
 use crate::workflow::entity::workflow_definition::{
@@ -11,25 +11,11 @@ use crate::workflow::entity::workflow_definition::{
 
 pub struct ForkJoinPlugin {}
 
-struct ChildTaskGatherResult {
-    pub completed_count: u64,
-    pub failed_count: u64,
-    pub skipped_count: u64,
-    pub running_count: u64,
-    pub not_found_count: u64,
-    pub results_map: serde_json::Map<String, JsonValue>,
-}
-
-impl ChildTaskGatherResult {
-    fn terminal_count(&self) -> u64 {
-        self.completed_count + self.failed_count
-    }
-}
-
 enum ForkJoinDecision {
     AllDone(ForkJoinOutcome),
     AllDispatched,
     NeedDispatch,
+    EarlyAbort,
 }
 
 enum ForkJoinOutcome {
@@ -42,37 +28,19 @@ impl ForkJoinPlugin {
         Self {}
     }
 
-    fn extract_template(
-        node_instance: &WorkflowNodeInstanceEntity,
-    ) -> anyhow::Result<&crate::task::entity::task_definition::ForkJoinTemplate> {
-        match &node_instance.task_instance.task_template {
-            TaskTemplate::ForkJoin(t) => Ok(t),
-            other => {
-                error!(node_id = %node_instance.node_id, template = ?other, "invalid template for ForkJoinPlugin");
-                Err(anyhow::anyhow!("Invalid task template for ForkJoinPlugin"))
-            }
-        }
-    }
-
-    fn should_abort(max_failures: Option<u32>, failed_count: u64) -> bool {
-        match max_failures {
-            Some(0) => failed_count > 0,
-            Some(max) => failed_count >= max as u64,
-            None => false,
-        }
-    }
-
     fn diagnose(
-        template: &crate::task::entity::task_definition::ForkJoinTemplate,
-        gather: &ChildTaskGatherResult,
+        total_tasks: u64,
+        max_failures: Option<u32>,
+        gather: &ContainerGatherResult,
     ) -> ForkJoinDecision {
-        let total_tasks = template.tasks.len() as u64;
+        if should_abort(max_failures, gather.failed_count) {
+            return ForkJoinDecision::EarlyAbort;
+        }
+
         let terminal = gather.terminal_count();
 
         if terminal == total_tasks {
-            let outcome = if Self::should_abort(template.max_failures, gather.failed_count)
-                || gather.failed_count > 0
-            {
+            let outcome = if gather.failed_count > 0 {
                 ForkJoinOutcome::Failed
             } else {
                 ForkJoinOutcome::Success
@@ -92,15 +60,8 @@ impl ForkJoinPlugin {
         template: &crate::task::entity::task_definition::ForkJoinTemplate,
         node_instance: &WorkflowNodeInstanceEntity,
         workflow_instance: &WorkflowInstanceEntity,
-    ) -> anyhow::Result<ChildTaskGatherResult> {
-        let mut result = ChildTaskGatherResult {
-            completed_count: 0,
-            failed_count: 0,
-            skipped_count: 0,
-            running_count: 0,
-            not_found_count: 0,
-            results_map: serde_json::Map::new(),
-        };
+    ) -> anyhow::Result<ContainerGatherResult> {
+        let mut result = ContainerGatherResult::new();
 
         for (index, item) in template.tasks.iter().enumerate() {
             let child_task_id = format!(
@@ -114,38 +75,7 @@ impl ForkJoinPlugin {
                 .resolve_child_status(&child_task_id, &item.task_template)
                 .await;
 
-            match child_task_status {
-                ChildStatus::Completed(output) => {
-                    result.completed_count += 1;
-                    result.results_map.insert(
-                        item.task_key.clone(),
-                        json!({ "status": "Success", "output": output }),
-                    );
-                }
-                ChildStatus::Failed(output, error) => {
-                    result.failed_count += 1;
-                    result.results_map.insert(
-                        item.task_key.clone(),
-                        json!({ "status": "Failed", "output": output, "error": error }),
-                    );
-                }
-                ChildStatus::Skipped(output) => {
-                    result.skipped_count += 1;
-                    result.completed_count += 1;
-                    result.results_map.insert(
-                        item.task_key.clone(),
-                        json!({ "status": "Skipped", "output": output }),
-                    );
-                }
-                ChildStatus::Running => {
-                    result.running_count += 1;
-                    result.results_map.insert(item.task_key.clone(), JsonValue::Null);
-                }
-                ChildStatus::NotFound => {
-                    result.not_found_count += 1;
-                    result.results_map.insert(item.task_key.clone(), JsonValue::Null);
-                }
-            }
+            result.record(item.task_key.clone(), child_task_status);
         }
 
         Ok(result)
@@ -157,7 +87,7 @@ impl ForkJoinPlugin {
         workflow_instance: &WorkflowInstanceEntity,
         node_instance: &WorkflowNodeInstanceEntity,
         dispatched_count: u64,
-        gather: &ChildTaskGatherResult,
+        gather: &ContainerGatherResult,
     ) -> Vec<usize> {
         let concurrency = template.concurrency as usize;
         let slots_available = concurrency.saturating_sub(gather.running_count as usize);
@@ -280,12 +210,12 @@ impl PluginInterface for ForkJoinPlugin {
             executor, &template, node_instance, workflow_instance,
         ).await?;
 
-        match Self::diagnose(&template, &gather) {
+        match Self::diagnose(total_tasks, template.max_failures, &gather) {
             ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::success(None))
             }
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) => {
+            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) | ForkJoinDecision::EarlyAbort => {
                 node_instance.error_message = Some(format!(
                     "ForkJoin aborted: {} failures out of {} tasks",
                     gather.failed_count, total_tasks
@@ -363,7 +293,7 @@ impl PluginInterface for ForkJoinPlugin {
             }
         };
 
-        if template.tasks.is_empty() {
+if template.tasks.is_empty() {
             return Ok(ExecutionResult::success(None));
         }
 
@@ -372,12 +302,12 @@ impl PluginInterface for ForkJoinPlugin {
             executor, &template, node_instance, workflow_instance,
         ).await?;
 
-        match Self::diagnose(&template, &gather) {
+        match Self::diagnose(total_tasks, template.max_failures, &gather) {
             ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::success(None))
             }
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) => {
+            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) | ForkJoinDecision::EarlyAbort => {
                 node_instance.error_message = Some(format!(
                     "ForkJoin aborted: {} failures out of {} tasks",
                     gather.failed_count, total_tasks

@@ -28,8 +28,8 @@ enum LoopOutcome {
 enum CallbackReadiness {
     /// Instance status does not accept this callback; nothing to do.
     Ignored,
-    /// Instance is ready; may have been reloaded from DB.
-    Ready(WorkflowInstanceEntity),
+    /// Instance is ready; transitions applied in-place to the caller's instance.
+    Ready,
 }
 
 /// Merged callback fields after optional enrichment from `task_instances`.
@@ -107,7 +107,7 @@ impl PluginManager {
 
         if let Err(e) = self
             .workflow_instance_svc
-            .release_lock(&job.workflow_instance_id, worker_id, instance.epoch)
+            .release_lock(&job.workflow_instance_id, worker_id)
             .await
         {
             warn!(
@@ -155,10 +155,9 @@ impl PluginManager {
         input: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
         let ready = self.prepare_instance_for_node_callback(instance, &node_id).await?;
-        let mut instance = match ready {
-            CallbackReadiness::Ignored => return Ok(()),
-            CallbackReadiness::Ready(i) => i,
-        };
+        if let CallbackReadiness::Ignored = ready {
+            return Ok(());
+        }
 
         debug!(
             workflow_instance_id = %workflow_instance_id,
@@ -189,7 +188,7 @@ impl PluginManager {
         let exec_result = match self
             .handle_node_callback(
                 &mut node,
-                &mut instance,
+                instance,
                 &child_task_id,
                 &payload.status,
                 &payload.output,
@@ -211,10 +210,10 @@ impl PluginManager {
         };
 
         instance.nodes[node_index] = node;
-        let action = self.apply_exec_result(&mut instance, node_index, exec_result).await?;
+        let action = self.apply_exec_result(instance, node_index, exec_result).await?;
 
         match action {
-            LoopAction::Advance | LoopAction::Retry => self.execute_workflow_loop(&mut instance).await,
+            LoopAction::Advance | LoopAction::Retry => self.execute_workflow_loop(instance).await,
             LoopAction::Done => Ok(()),
         }
     }
@@ -542,7 +541,7 @@ impl PluginManager {
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
 
-                Ok(CallbackReadiness::Ready(instance.clone()))
+                Ok(CallbackReadiness::Ready)
             }
             WorkflowInstanceStatus::Suspended => {
                 self.workflow_instance_svc
@@ -554,7 +553,7 @@ impl PluginManager {
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
 
-                Ok(CallbackReadiness::Ready(instance.clone()))
+                Ok(CallbackReadiness::Ready)
             }
             WorkflowInstanceStatus::Pending => {
                 self.workflow_instance_svc
@@ -562,9 +561,9 @@ impl PluginManager {
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
 
-                Ok(CallbackReadiness::Ready(instance.clone()))
+                Ok(CallbackReadiness::Ready)
             }
-            WorkflowInstanceStatus::Running => Ok(CallbackReadiness::Ready(instance.clone())),
+            WorkflowInstanceStatus::Running => Ok(CallbackReadiness::Ready),
             _ => {
                 debug!(
                     workflow_instance_id = %instance.workflow_instance_id,

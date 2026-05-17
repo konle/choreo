@@ -478,14 +478,12 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         &self,
         workflow_instance_id: &str,
         worker_id: &str,
-        expected_epoch: u64,
     ) -> Result<(), RepositoryError> {
         let now_bson = mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?;
 
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "locked_by": worker_id,
-            "epoch": expected_epoch as i64,
         };
 
         let update_doc = doc! {
@@ -505,7 +503,7 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
 
         if result.matched_count == 0 {
             return Err(format!(
-                "failed to release lock for instance {} (not held by {} or epoch mismatch)",
+                "failed to release lock for instance {} (not held by {})",
                 workflow_instance_id, worker_id
             )
             .into());
@@ -590,16 +588,19 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
             "status": { "$in": [status_running, status_await] },
             "$or": [
                 { "locked_at": mongodb::bson::Bson::Null },
-                { "$expr": {
-                    "$lt": [
-                        { "$dateAdd": {
-                            "startDate": "$locked_at",
-                            "unit": "millisecond",
-                            "amount": "$locked_duration"
-                        }},
-                        now_bson
-                    ]
-                }}
+                { "$and": [
+                    { "locked_at": { "$ne": mongodb::bson::Bson::Null } },
+                    { "$expr": {
+                        "$lt": [
+                            { "$dateAdd": {
+                                "startDate": "$locked_at",
+                                "unit": "millisecond",
+                                "amount": "$locked_duration"
+                            }},
+                            now_bson
+                        ]
+                    }}
+                ]}
             ]
         };
 

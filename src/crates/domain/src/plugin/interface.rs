@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 use crate::shared::workflow::TaskType;
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob};
 use crate::task::entity::task_definition::TaskTemplate;
@@ -143,4 +143,82 @@ pub enum ChildStatus {
     Running,
     /// Child instance not found in storage (not yet created / dispatched).
     NotFound,
+}
+
+/// Gathered status of all children in a container plugin (ForkJoin / Parallel).
+#[derive(Debug)]
+pub struct ContainerGatherResult {
+    pub completed_count: u64,
+    pub failed_count: u64,
+    pub skipped_count: u64,
+    pub running_count: u64,
+    pub not_found_count: u64,
+    pub results_map: serde_json::Map<String, JsonValue>,
+}
+
+impl ContainerGatherResult {
+    pub fn new() -> Self {
+        Self {
+            completed_count: 0,
+            failed_count: 0,
+            skipped_count: 0,
+            running_count: 0,
+            not_found_count: 0,
+            results_map: serde_json::Map::new(),
+        }
+    }
+
+    pub fn terminal_count(&self) -> u64 {
+        self.completed_count + self.failed_count
+    }
+
+    pub fn record(&mut self, key: String, status: ChildStatus) {
+        match status {
+            ChildStatus::Completed(output) => {
+                self.completed_count += 1;
+                self.results_map.insert(key, json!({ "status": "Success", "output": output }));
+            }
+            ChildStatus::Failed(output, error) => {
+                self.failed_count += 1;
+                self.results_map.insert(key, json!({ "status": "Failed", "output": output, "error": error }));
+            }
+            ChildStatus::Skipped(output) => {
+                self.skipped_count += 1;
+                self.completed_count += 1;
+                self.results_map.insert(key, json!({ "status": "Skipped", "output": output }));
+            }
+            ChildStatus::Running => {
+                self.running_count += 1;
+                self.results_map.insert(key, JsonValue::Null);
+            }
+            ChildStatus::NotFound => {
+                self.not_found_count += 1;
+                self.results_map.insert(key, JsonValue::Null);
+            }
+        }
+    }
+}
+
+/// Decision returned by `diagnose` for container plugins.
+#[derive(Debug)]
+pub enum ContainerDecision {
+    AllDone(ContainerOutcome),
+    AllDispatched,
+    NeedDispatch,
+    EarlyAbort,
+}
+
+#[derive(Debug)]
+pub enum ContainerOutcome {
+    Success,
+    Failed,
+}
+
+/// Whether the container should abort early due to max_failures threshold.
+pub fn should_abort(max_failures: Option<u32>, failed_count: u64) -> bool {
+    match max_failures {
+        Some(0) => failed_count > 0,
+        Some(max) => failed_count >= max as u64,
+        None => false,
+    }
 }

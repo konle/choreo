@@ -1,14 +1,13 @@
 use async_trait::async_trait;
-use serde_json::Value as JsonValue;
-use tracing::{debug, warn, error};
+use serde_json::{Value as JsonValue, json};
+use tracing::{debug, error};
 
-use crate::plugin::interface::{ExecutionResult, PluginExecutor, PluginInterface};
-use crate::shared::workflow::TaskType;
-use crate::shared::job::{ExecuteTaskJob, WorkflowCallerContext};
+use crate::plugin::interface::{ChildStatus, ContainerDecision, ContainerGatherResult, ContainerOutcome, ExecutionResult, PluginExecutor, PluginInterface, should_abort};
+use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowCallerContext};
+use crate::task::entity::task_definition::{ParallelMode, ParallelTemplate, TaskTemplate};
 use crate::workflow::entity::workflow_definition::{
     NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
-use crate::task::entity::task_definition::TaskTemplate;
 
 pub struct ParallelPlugin {}
 
@@ -16,107 +15,152 @@ impl ParallelPlugin {
     pub fn new() -> Self {
         Self {}
     }
-}
 
-#[async_trait]
-impl PluginInterface for ParallelPlugin {
-    async fn execute(
-        &self,
-        _executor: &dyn PluginExecutor,
-        node_instance: &mut WorkflowNodeInstanceEntity,
-        workflow_instance: &mut WorkflowInstanceEntity,
-    ) -> anyhow::Result<ExecutionResult> {
-        let template = match &node_instance.task_instance.task_template {
-            TaskTemplate::Parallel(t) => t,
-            other => {
-                error!(node_id = %node_instance.node_id, template = ?other, "invalid template for ParallelPlugin");
-                return Err(anyhow::anyhow!("Invalid task template for ParallelPlugin"));
-            }
-        };
-
-        // Re-evaluation: if state already exists (dispatched_count > 0), this is a re-entry
-        if let Some(ref state) = node_instance.task_instance.output {
-            let dispatched = state.get("dispatched_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            if dispatched > 0 {
-                debug!(
-                    node_id = %node_instance.node_id,
-                    "parallel: re-evaluation — children already dispatched, returning Await"
-                );
-                return Ok(ExecutionResult {
-                    status: NodeExecutionStatus::Await,
-                    dispatch_jobs: vec![],
-                    dispatch_workflow_jobs: vec![],
-                    jump_to_node: None,
-                });
-            }
-        }
-
-        let items_path = &template.items_path;
-        
-        let pointer_path = if items_path.starts_with('/') {
-            items_path.clone()
+    fn resolve_items(
+        template: &ParallelTemplate,
+        node_instance: &WorkflowNodeInstanceEntity,
+        workflow_instance: &WorkflowInstanceEntity,
+    ) -> anyhow::Result<Vec<JsonValue>> {
+        let pointer_path = if template.items_path.starts_with('/') {
+            template.items_path.clone()
         } else {
-            format!("/{}", items_path.replace(".", "/"))
+            format!("/{}", template.items_path.replace('.', "/"))
         };
 
-        let items_val = workflow_instance.context.pointer(&pointer_path)
+        let items_val = workflow_instance
+            .context
+            .pointer(&pointer_path)
             .or_else(|| node_instance.context.pointer(&pointer_path));
 
-        let items = match items_val {
-            Some(JsonValue::Array(arr)) => arr,
+        match items_val {
+            Some(JsonValue::Array(arr)) => Ok(arr.clone()),
             _ => {
                 error!(
                     node_id = %node_instance.node_id,
-                    items_path = %items_path,
+                    items_path = %template.items_path,
                     "items path did not resolve to a JSON array"
                 );
-                return Err(anyhow::anyhow!("Items path '{}' did not resolve to a JSON array", items_path));
+                Err(anyhow::anyhow!(
+                    "Items path '{}' did not resolve to a JSON array",
+                    template.items_path
+                ))
             }
-        };
+        }
+    }
 
-        if items.is_empty() {
-            debug!(node_id = %node_instance.node_id, "parallel: empty items, completing immediately");
-            return Ok(ExecutionResult::success(None));
+    fn diagnose(
+        total_items: u64,
+        max_failures: Option<u32>,
+        gather: &ContainerGatherResult,
+    ) -> ContainerDecision {
+        if should_abort(max_failures, gather.failed_count) {
+            return ContainerDecision::EarlyAbort;
         }
 
-        let total_items = items.len();
-        let concurrency = template.concurrency as usize;
-        let initial_dispatch_count = std::cmp::min(total_items, concurrency);
+        let terminal = gather.terminal_count();
 
-        debug!(
-            node_id = %node_instance.node_id,
-            total_items = total_items,
-            concurrency = concurrency,
-            initial_dispatch = initial_dispatch_count,
-            "parallel: dispatching initial batch"
-        );
+        if terminal == total_items {
+            let outcome = if gather.failed_count > 0 {
+                ContainerOutcome::Failed
+            } else {
+                ContainerOutcome::Success
+            };
+            return ContainerDecision::AllDone(outcome);
+        }
 
-        node_instance.task_instance.input = Some(serde_json::json!({
-            "items_path": template.items_path,
-            "item_alias": template.item_alias,
-            "concurrency": template.concurrency,
-            "mode": format!("{:?}", template.mode),
-            "max_failures": template.max_failures,
-        }));
+        if gather.not_found_count == 0 && terminal + gather.running_count == total_items {
+            return ContainerDecision::AllDispatched;
+        }
 
-        let mut results_map = serde_json::Map::new();
+        ContainerDecision::NeedDispatch
+    }
+
+    async fn gather_child_status(
+        executor: &dyn PluginExecutor,
+        inner_template: &TaskTemplate,
+        total_items: usize,
+        node_instance: &WorkflowNodeInstanceEntity,
+        workflow_instance: &WorkflowInstanceEntity,
+    ) -> anyhow::Result<ContainerGatherResult> {
+        let mut result = ContainerGatherResult::new();
+
         for index in 0..total_items {
-            let child_id = format!("{}-{}-{}", workflow_instance.workflow_instance_id, node_instance.node_id, index);
-            results_map.insert(child_id, JsonValue::Null);
+            let child_task_id = format!(
+                "{}-{}-{}",
+                workflow_instance.workflow_instance_id,
+                node_instance.node_id,
+                index
+            );
+
+            let child_status = executor
+                .resolve_child_status(&child_task_id, inner_template)
+                .await;
+
+            let child_key = format!("{}", index);
+            result.record(child_key, child_status);
         }
 
-        let state = serde_json::json!({
-            "total_items": total_items,
-            "dispatched_count": initial_dispatch_count,
-            "success_count": 0,
-            "failed_count": 0,
-            "skipped_count": 0,
-            "results": results_map,
-        });
-        node_instance.task_instance.output = Some(state);
+        Ok(result)
+    }
 
-        let mut jobs = Vec::new();
-        for index in 0..initial_dispatch_count {
+    async fn calc_dispatch_indices(
+        executor: &dyn PluginExecutor,
+        inner_template: &TaskTemplate,
+        template: &ParallelTemplate,
+        total_items: usize,
+        workflow_instance: &WorkflowInstanceEntity,
+        node_instance: &WorkflowNodeInstanceEntity,
+        dispatched_count: u64,
+        gather: &ContainerGatherResult,
+    ) -> Vec<usize> {
+        let concurrency = template.concurrency as usize;
+        let slots_available = concurrency.saturating_sub(gather.running_count as usize);
+
+        if slots_available == 0 {
+            return Vec::new();
+        }
+
+        if template.mode == ParallelMode::Batch && gather.running_count > 0 {
+            return Vec::new();
+        }
+
+        let mut indices = Vec::new();
+        for index in dispatched_count as usize..total_items {
+            if indices.len() >= slots_available {
+                break;
+            }
+            let child_id = format!(
+                "{}-{}-{}",
+                workflow_instance.workflow_instance_id,
+                node_instance.node_id,
+                index
+            );
+            let child_status = executor
+                .resolve_child_status(&child_id, inner_template)
+                .await;
+            if matches!(child_status, ChildStatus::NotFound) {
+                indices.push(index);
+            }
+        }
+        indices
+    }
+
+fn build_dispatch_jobs(
+        inner_template: &TaskTemplate,
+        workflow_instance: &WorkflowInstanceEntity,
+        node_instance: &WorkflowNodeInstanceEntity,
+        indices: &[usize],
+    ) -> (Vec<ExecuteTaskJob>, Vec<ExecuteWorkflowJob>) {
+        let mut dispatch_jobs = Vec::new();
+        let mut dispatch_workflow_jobs = Vec::new();
+
+        for &index in indices {
+            let child_id = format!(
+                "{}-{}-{}",
+                workflow_instance.workflow_instance_id,
+                node_instance.node_id,
+                index
+            );
             let caller_context = WorkflowCallerContext {
                 workflow_instance_id: workflow_instance.workflow_instance_id.clone(),
                 node_id: node_instance.node_id.clone(),
@@ -124,248 +168,255 @@ impl PluginInterface for ParallelPlugin {
                 item_index: Some(index),
             };
 
-            let job = ExecuteTaskJob {
-                task_instance_id: format!("{}-{}-{}", workflow_instance.workflow_instance_id, node_instance.node_id, index),
-                tenant_id: workflow_instance.tenant_id.clone(),
-                caller_context: Some(caller_context),
-            };
-            jobs.push(job);
+            match inner_template {
+                TaskTemplate::SubWorkflow(_) => {
+                    dispatch_workflow_jobs.push(ExecuteWorkflowJob {
+                        workflow_instance_id: child_id,
+                        tenant_id: workflow_instance.tenant_id.clone(),
+                        event: crate::shared::job::WorkflowEvent::Start,
+                    });
+                }
+                _ => {
+                    dispatch_jobs.push(ExecuteTaskJob {
+                        task_instance_id: child_id,
+                        tenant_id: workflow_instance.tenant_id.clone(),
+                        caller_context: Some(caller_context),
+                    });
+                }
+            }
         }
 
-        Ok(ExecutionResult::async_dispatch_multiple(jobs))
+        (dispatch_jobs, dispatch_workflow_jobs)
+    }
+
+    fn write_output(
+        node_instance: &mut WorkflowNodeInstanceEntity,
+        total_items: u64,
+        dispatched_count: u64,
+        results_map: serde_json::Map<String, JsonValue>,
+    ) {
+        node_instance.task_instance.output = Some(json!({
+            "total_items": total_items,
+            "dispatched_count": dispatched_count,
+            "results": results_map,
+        }));
+    }
+}
+
+/*
+同构并发插件：execute 和 handle_callback 统一通过全表扫描获取子任务真实状态，
+不再依赖增量计数器（success_count/failed_count/processed_callbacks）。
+回调仅做"唤醒父工作流"，状态判断由扫表驱动。
+*/
+#[async_trait]
+impl PluginInterface for ParallelPlugin {
+    async fn execute(
+        &self,
+        executor: &dyn PluginExecutor,
+        node_instance: &mut WorkflowNodeInstanceEntity,
+        workflow_instance: &mut WorkflowInstanceEntity,
+    ) -> anyhow::Result<ExecutionResult> {
+        let template = match &node_instance.task_instance.task_template {
+            TaskTemplate::Parallel(t) => t.clone(),
+            other => {
+                error!(node_id = %node_instance.node_id, template = ?other, "invalid template for ParallelPlugin");
+                return Err(anyhow::anyhow!("Invalid task template for ParallelPlugin"));
+            }
+        };
+
+        let items = Self::resolve_items(&template, node_instance, workflow_instance)?;
+
+        if items.is_empty() {
+            debug!(node_id = %node_instance.node_id, "parallel: empty items, completing immediately");
+            return Ok(ExecutionResult::success(None));
+        }
+
+        let total_items = items.len() as u64;
+        let inner_template = &template.task_template;
+
+        let gather = Self::gather_child_status(
+            executor, inner_template, items.len(),
+            node_instance, workflow_instance,
+        ).await?;
+
+        match Self::diagnose(total_items, template.max_failures, &gather) {
+            ContainerDecision::AllDone(ContainerOutcome::Success) => {
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult::success(None))
+            }
+            ContainerDecision::AllDone(ContainerOutcome::Failed) | ContainerDecision::EarlyAbort => {
+                node_instance.error_message = Some(format!(
+                    "Parallel aborted: {} failures out of {} items",
+                    gather.failed_count, total_items
+                ));
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult::failed())
+            }
+            ContainerDecision::AllDispatched => {
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult {
+                    status: NodeExecutionStatus::Await,
+                    dispatch_jobs: vec![],
+                    dispatch_workflow_jobs: vec![],
+                    jump_to_node: None,
+                })
+            }
+            ContainerDecision::NeedDispatch => {
+                let dispatched_count = node_instance
+                    .task_instance
+                    .output
+                    .as_ref()
+                    .and_then(|s| s.get("dispatched_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let indices = Self::calc_dispatch_indices(
+                    executor, inner_template, &template, items.len(),
+                    workflow_instance, node_instance,
+                    dispatched_count, &gather,
+                ).await;
+
+                node_instance.task_instance.input = Some(json!({
+                    "items_path": template.items_path,
+                    "item_alias": template.item_alias,
+                    "concurrency": template.concurrency,
+                    "mode": format!("{:?}", template.mode),
+                    "max_failures": template.max_failures,
+                }));
+
+                let (dispatch_jobs, dispatch_workflow_jobs) = Self::build_dispatch_jobs(
+                    inner_template,
+                    workflow_instance, node_instance, &indices,
+                );
+
+                let new_dispatched = std::cmp::max(
+                    dispatched_count,
+                    indices.last().map(|&i| i as u64 + 1).unwrap_or(dispatched_count),
+                );
+
+                Self::write_output(node_instance, total_items, new_dispatched, gather.results_map);
+
+                Ok(ExecutionResult {
+                    status: NodeExecutionStatus::Await,
+                    dispatch_jobs,
+                    dispatch_workflow_jobs,
+                    jump_to_node: None,
+                })
+            }
+        }
     }
 
     async fn handle_callback(
         &self,
-        _executor: &dyn PluginExecutor,
+        executor: &dyn PluginExecutor,
         node_instance: &mut WorkflowNodeInstanceEntity,
         workflow_instance: &mut WorkflowInstanceEntity,
-        child_task_id: &str,
-        status: &NodeExecutionStatus,
+        _child_task_id: &str,
+        _status: &NodeExecutionStatus,
         _output: &Option<serde_json::Value>,
         _error_message: &Option<String>,
         _input: &Option<serde_json::Value>,
     ) -> anyhow::Result<ExecutionResult> {
         let template = match &node_instance.task_instance.task_template {
-            TaskTemplate::Parallel(t) => t,
+            TaskTemplate::Parallel(t) => t.clone(),
             other => {
                 error!(node_id = %node_instance.node_id, template = ?other, "invalid template for ParallelPlugin callback");
                 return Err(anyhow::anyhow!("Invalid task template for ParallelPlugin"));
             }
         };
 
-        let mut state = node_instance.task_instance.output.clone().unwrap_or(serde_json::json!({}));
+        let items = Self::resolve_items(&template, node_instance, workflow_instance)?;
 
-        let processed: Vec<String> = state
-            .get("processed_callbacks")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let is_duplicate = processed.contains(&child_task_id.to_string());
-
-        if is_duplicate && *status != NodeExecutionStatus::Skipped {
-            warn!(
-                node_id = %node_instance.node_id,
-                child_task_id = %child_task_id,
-                "parallel: duplicate callback ignored"
-            );
-            return Ok(ExecutionResult::async_dispatch_multiple(vec![]));
+        if items.is_empty() {
+            return Ok(ExecutionResult::success(None));
         }
 
-        let mut success_count = state["success_count"].as_u64().unwrap_or(0);
-        let mut failed_count = state["failed_count"].as_u64().unwrap_or(0);
-        let mut skipped_count = state["skipped_count"].as_u64().unwrap_or(0);
-        let total_items = state["total_items"].as_u64().unwrap_or(0);
-        let mut dispatched_count = state["dispatched_count"].as_u64().unwrap_or(0);
+        let total_items = items.len() as u64;
+        let inner_template = &template.task_template;
 
-        if is_duplicate && *status == NodeExecutionStatus::Skipped {
-            let prev_status = state.get("results")
-                .and_then(|r| r.get(child_task_id))
-                .and_then(|e| e.get("status"))
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
-            match prev_status {
-                "Failed" => { failed_count = failed_count.saturating_sub(1); }
-                "Success" => { success_count = success_count.saturating_sub(1); }
-                _ => {}
+        let gather = Self::gather_child_status(
+            executor, inner_template, items.len(),
+            node_instance, workflow_instance,
+        ).await?;
+
+        match Self::diagnose(total_items, template.max_failures, &gather) {
+            ContainerDecision::AllDone(ContainerOutcome::Success) => {
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult::success(None))
             }
-            success_count += 1;
-            skipped_count += 1;
-            debug!(
-                node_id = %node_instance.node_id,
-                child_task_id = %child_task_id,
-                prev_status = %prev_status,
-                "parallel: skip overriding previous callback"
-            );
-        } else if *status == NodeExecutionStatus::Success {
-            success_count += 1;
-        } else if *status == NodeExecutionStatus::Skipped {
-            success_count += 1;
-            skipped_count += 1;
-        } else if *status == NodeExecutionStatus::Failed {
-            failed_count += 1;
-        }
+            ContainerDecision::AllDone(ContainerOutcome::Failed) | ContainerDecision::EarlyAbort => {
+                node_instance.error_message = Some(format!(
+                    "Parallel aborted: {} failures out of {} items",
+                    gather.failed_count, total_items
+                ));
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult::failed())
+            }
+            ContainerDecision::AllDispatched => {
+                Self::write_output(node_instance, total_items, total_items, gather.results_map);
+                Ok(ExecutionResult {
+                    status: NodeExecutionStatus::Await,
+                    dispatch_jobs: vec![],
+                    dispatch_workflow_jobs: vec![],
+                    jump_to_node: None,
+                })
+            }
+            ContainerDecision::NeedDispatch => {
+                let dispatched_count = node_instance
+                    .task_instance
+                    .output
+                    .as_ref()
+                    .and_then(|s| s.get("dispatched_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
-        let result_entry = serde_json::json!({
-            "status": format!("{:?}", status),
-            "output": _output,
-            "error": _error_message,
-        });
-        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
-            results.insert(child_task_id.to_string(), result_entry);
-        }
+                let indices = Self::calc_dispatch_indices(
+                    executor, inner_template, &template, items.len(),
+                    workflow_instance, node_instance,
+                    dispatched_count, &gather,
+                ).await;
 
-        let concurrency = template.concurrency as u64;
-        let mode = template.mode.clone();
-        let max_failures = template.max_failures;
+                let (dispatch_jobs, dispatch_workflow_jobs) = Self::build_dispatch_jobs(
+                    inner_template,
+                    workflow_instance, node_instance, &indices,
+                );
 
-        // Stale Failure Check: verify previously-failed children are actually still failed.
-        // If any have been retried (no longer Failed), reconcile counters.
-        if failed_count > 0 {
-            if let Some(results_obj) = state.get("results").and_then(|r| r.as_object()) {
-                let failed_ids: Vec<String> = results_obj
-                    .iter()
-                    .filter(|(k, v)| {
-                        *k != child_task_id
-                            && v.get("status")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s == "Failed")
-                                .unwrap_or(false)
-                    })
-                    .map(|(k, _)| k.clone())
-                    .collect();
+                let new_dispatched = std::cmp::max(
+                    dispatched_count,
+                    indices.last().map(|&i| i as u64 + 1).unwrap_or(dispatched_count),
+                );
 
-                let mut stale_count = 0u64;
-                for fid in &failed_ids {
-                    if !_executor.is_task_still_failed(fid).await {
-                        stale_count += 1;
-                        // Remove from processed_callbacks
-                        if let Some(arr) = state.get_mut("processed_callbacks").and_then(|v| v.as_array_mut()) {
-                            arr.retain(|v| v.as_str() != Some(fid.as_str()));
-                        }
-                        // Reset results entry
-                        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
-                            results.insert(fid.clone(), serde_json::Value::Null);
-                        }
-                    }
-                }
-                if stale_count > 0 {
-                    failed_count = failed_count.saturating_sub(stale_count);
-                    debug!(
-                        node_id = %node_instance.node_id,
-                        stale_count = stale_count,
-                        new_failed_count = failed_count,
-                        "parallel: stale failure check reconciled counters"
-                    );
-                }
+                Self::write_output(node_instance, total_items, new_dispatched, gather.results_map);
+
+                Ok(ExecutionResult {
+                    status: NodeExecutionStatus::Await,
+                    dispatch_jobs,
+                    dispatch_workflow_jobs,
+                    jump_to_node: None,
+                })
             }
         }
-
-        // max_failures: early-abort threshold only.
-        //   Some(n) → abort as soon as failed_count >= n (don't waste resources on remaining items)
-        //   None    → never abort early; wait for all items to finish
-        // At completion: failed_count > 0 always means Failed.
-        let early_abort = match max_failures {
-            Some(max) => failed_count >= max as u64,
-            None => false,
-        };
-
-        let all_done = success_count + failed_count == total_items;
-
-        let exec_result = if early_abort {
-            warn!(
-                node_id = %node_instance.node_id,
-                failed_count = failed_count,
-                max_failures = ?max_failures,
-                "parallel: max_failures reached, aborting"
-            );
-            node_instance.error_message = Some(format!("Parallel aborted: {} failures reached max_failures={}", failed_count, max_failures.unwrap_or(0)));
-            ExecutionResult::failed()
-        } else if all_done && failed_count > 0 {
-            warn!(
-                node_id = %node_instance.node_id,
-                failed_count = failed_count,
-                success_count = success_count,
-                "parallel: completed with failures"
-            );
-            node_instance.error_message = Some(format!("Parallel completed with {} failures out of {} items", failed_count, total_items));
-            ExecutionResult::failed()
-        } else if all_done {
-            debug!(
-                node_id = %node_instance.node_id,
-                success_count = success_count,
-                "parallel: all items completed successfully"
-            );
-            ExecutionResult::success(None)
-        } else {
-            let mut jobs_to_dispatch = Vec::new();
-            
-            if mode == crate::task::entity::task_definition::ParallelMode::Rolling {
-                if dispatched_count < total_items {
-                    jobs_to_dispatch.push(dispatched_count);
-                    dispatched_count += 1;
-                }
-            } else if mode == crate::task::entity::task_definition::ParallelMode::Batch {
-                if success_count + failed_count == dispatched_count {
-                    let end = std::cmp::min(dispatched_count + concurrency, total_items);
-                    for i in dispatched_count..end {
-                        jobs_to_dispatch.push(i);
-                    }
-                    dispatched_count = end;
-                }
-            }
-
-            let mut new_jobs = Vec::new();
-            for idx in jobs_to_dispatch {
-                let caller_context = WorkflowCallerContext {
-                    workflow_instance_id: workflow_instance.workflow_instance_id.clone(),
-                    node_id: node_instance.node_id.clone(),
-                    parent_task_instance_id: Some(node_instance.task_instance.id.clone()),
-                    item_index: Some(idx as usize),
-                };
-                let child_job = ExecuteTaskJob {
-                    task_instance_id: format!("{}-{}-{}", workflow_instance.workflow_instance_id, node_instance.node_id, idx),
-                    tenant_id: workflow_instance.tenant_id.clone(),
-                    caller_context: Some(caller_context),
-                };
-                new_jobs.push(child_job);
-            }
-            ExecutionResult::async_dispatch_multiple(new_jobs)
-        };
-
-        state["success_count"] = serde_json::json!(success_count);
-        state["failed_count"] = serde_json::json!(failed_count);
-        state["skipped_count"] = serde_json::json!(skipped_count);
-        state["dispatched_count"] = serde_json::json!(dispatched_count);
-        let mut updated_processed = processed;
-        updated_processed.push(child_task_id.to_string());
-        state["processed_callbacks"] = serde_json::json!(updated_processed);
-        node_instance.task_instance.output = Some(state);
-
-        Ok(exec_result)
     }
 
-    fn plugin_type(&self) -> TaskType {
-        TaskType::Parallel
+    fn plugin_type(&self) -> crate::shared::workflow::TaskType {
+        crate::shared::workflow::TaskType::Parallel
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::interface::{PluginExecutor, PluginInterface};
+    use crate::plugin::interface::{ChildStatus, PluginExecutor, PluginInterface};
     use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
     use crate::task::entity::task_definition::{
-        HttpMethod, ParallelMode, ParallelTemplate, TaskHttpTemplate, TaskTemplate,
+        HttpMethod, TaskHttpTemplate,
     };
     use chrono::Utc;
+    use std::collections::HashMap;
 
-    struct StubExecutor;
+    struct StubExecutor {
+        child_statuses: HashMap<String, ChildStatus>,
+    }
 
     #[async_trait::async_trait]
     impl PluginExecutor for StubExecutor {
@@ -388,6 +439,17 @@ mod tests {
         ) -> anyhow::Result<ExecutionResult> {
             unreachable!()
         }
+
+        async fn resolve_child_status(
+            &self,
+            child_task_instance_id: &str,
+            _task_template: &TaskTemplate,
+        ) -> ChildStatus {
+            self.child_statuses
+                .get(child_task_instance_id)
+                .cloned()
+                .unwrap_or(ChildStatus::NotFound)
+        }
     }
 
     fn http_template() -> TaskHttpTemplate {
@@ -404,50 +466,36 @@ mod tests {
         }
     }
 
-    fn parallel_template(total: usize) -> TaskTemplate {
+    fn parallel_template(concurrency: u32, mode: ParallelMode, max_failures: Option<u32>) -> TaskTemplate {
         TaskTemplate::Parallel(ParallelTemplate {
             items_path: "items".into(),
             item_alias: "item".into(),
             task_template: Box::new(TaskTemplate::Http(http_template())),
-            concurrency: total as u32,
-            mode: ParallelMode::Rolling,
-            max_failures: None,
+            concurrency,
+            mode,
+            max_failures,
         })
     }
 
-    fn make_node(node_id: &str, total: usize, dispatched: usize, success: u64, failed: u64, skipped: u64, processed: Vec<String>) -> WorkflowNodeInstanceEntity {
+    fn make_node(node_id: &str, _total: usize, template: TaskTemplate, output: Option<JsonValue>) -> WorkflowNodeInstanceEntity {
         let now = Utc::now();
-        let mut results_map = serde_json::Map::new();
-        for i in 0..total {
-            let child_id = format!("wf1-{}-{}", node_id, i);
-            results_map.insert(child_id, JsonValue::Null);
-        }
-        let state = serde_json::json!({
-            "total_items": total,
-            "dispatched_count": dispatched,
-            "success_count": success,
-            "failed_count": failed,
-            "skipped_count": skipped,
-            "processed_callbacks": processed,
-            "results": results_map,
-        });
         WorkflowNodeInstanceEntity {
             node_id: node_id.into(),
-            node_type: TaskType::Parallel,
+            node_type: crate::shared::workflow::TaskType::Parallel,
             task_instance: crate::task::entity::task_definition::TaskInstanceEntity {
                 id: format!("ti-{}", node_id),
                 tenant_id: "t1".into(),
                 task_id: "".into(),
                 task_name: "parallel".into(),
-                task_type: TaskType::Parallel,
-                task_template: parallel_template(total),
+                task_type: crate::shared::workflow::TaskType::Parallel,
+                task_template: template,
                 task_status: TaskInstanceStatus::Running,
                 task_instance_id: format!("ti-{}", node_id),
                 created_at: now,
                 updated_at: now,
                 deleted_at: None,
                 input: None,
-                output: Some(state),
+                output,
                 error_message: None,
                 execution_duration: None,
                 caller_context: None,
@@ -461,7 +509,7 @@ mod tests {
         }
     }
 
-    fn make_instance() -> WorkflowInstanceEntity {
+    fn make_instance_with_items(items: Vec<JsonValue>) -> WorkflowInstanceEntity {
         let now = Utc::now();
         WorkflowInstanceEntity {
             workflow_instance_id: "wf1".into(),
@@ -472,7 +520,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             deleted_at: None,
-            context: serde_json::json!({"items": [1,2,3]}),
+            context: serde_json::json!({ "items": items }),
             entry_node: "p".into(),
             current_node: "p".into(),
             nodes: vec![],
@@ -486,155 +534,125 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn skipped_callback_counts_as_success() {
-        let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        let mut node = make_node("p", 3, 3, 1, 0, 0, vec!["wf1-p-0".into()]);
-        let mut wf = make_instance();
-
-        let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-1",
-                &NodeExecutionStatus::Skipped,
-                &Some(serde_json::json!({})),
-                &None,
-                &None,
-            )
-            .await
-            .unwrap();
-
-        let state = node.task_instance.output.unwrap();
-        assert_eq!(state["success_count"], 2);
-        assert_eq!(state["skipped_count"], 1);
-        assert_eq!(state["failed_count"], 0);
-        assert_eq!(result.status, NodeExecutionStatus::Await);
+    fn make_instance() -> WorkflowInstanceEntity {
+        make_instance_with_items(vec![json!(1), json!(2), json!(3)])
     }
 
     #[tokio::test]
-    async fn all_skipped_completes_parallel() {
+    async fn all_not_found_dispatches_initial_batch() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        let mut node = make_node("p", 2, 2, 0, 0, 1, vec!["wf1-p-0".into()]);
-        {
-            let s = node.task_instance.output.as_mut().unwrap();
-            s["success_count"] = serde_json::json!(1);
-        }
+        let mut node = make_node("p", 3, parallel_template(3, ParallelMode::Rolling, None), None);
         let mut wf = make_instance();
 
-        let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-1",
-                &NodeExecutionStatus::Skipped,
-                &Some(serde_json::json!({})),
-                &None,
-                &None,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.status, NodeExecutionStatus::Success);
-        let state = node.task_instance.output.unwrap();
-        assert_eq!(state["success_count"], 2);
-        assert_eq!(state["skipped_count"], 2);
-    }
-
-    #[tokio::test]
-    async fn duplicate_non_skip_callback_ignored() {
-        let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        let mut node = make_node("p", 2, 2, 1, 0, 0, vec!["wf1-p-0".into()]);
-
-        let mut wf = make_instance();
+        let exec = StubExecutor {
+            child_statuses: HashMap::new(),
+        };
 
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-0",
-                &NodeExecutionStatus::Success,
-                &Some(serde_json::json!({})),
-                &None,
-                &None,
-            )
+            .execute(&exec, &mut node, &mut wf)
             .await
             .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
-        let state = node.task_instance.output.unwrap();
-        assert_eq!(state["success_count"], 1);
+        assert_eq!(result.dispatch_jobs.len(), 3);
+        let output = node.task_instance.output.unwrap();
+        assert_eq!(output["dispatched_count"], 3);
     }
 
     #[tokio::test]
-    async fn skip_overrides_previous_failed_callback() {
+    async fn all_completed_returns_success() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        // total=2, dispatched=2, success=1, failed=1
-        // Both already processed, node_6-0 was Failed, node_6-1 was Success
-        let mut node = make_node("p", 2, 2, 1, 1, 0, vec!["wf1-p-0".into(), "wf1-p-1".into()]);
-        {
-            let s = node.task_instance.output.as_mut().unwrap();
-            if let Some(results) = s.get_mut("results").and_then(|r| r.as_object_mut()) {
-                results.insert("wf1-p-0".into(), serde_json::json!({"status": "Failed", "output": null, "error": "err"}));
-                results.insert("wf1-p-1".into(), serde_json::json!({"status": "Success", "output": {}, "error": null}));
-            }
-        }
+        let mut node = make_node("p", 3, parallel_template(3, ParallelMode::Rolling, None), None);
         let mut wf = make_instance();
 
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(Some(json!(1))));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Completed(Some(json!(2))));
+        statuses.insert("wf1-p-2".into(), ChildStatus::Completed(Some(json!(3))));
+        let exec = StubExecutor { child_statuses: statuses };
+
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-0",
-                &NodeExecutionStatus::Skipped,
-                &Some(serde_json::json!({})),
-                &None,
-                &None,
-            )
+            .execute(&exec, &mut node, &mut wf)
             .await
             .unwrap();
 
-        // Skip overrides Failed → now success_count=2, failed_count=0 → all done → Success
         assert_eq!(result.status, NodeExecutionStatus::Success);
-        let state = node.task_instance.output.unwrap();
-        assert_eq!(state["success_count"], 2);
-        assert_eq!(state["failed_count"], 0);
-        assert_eq!(state["skipped_count"], 1);
-        assert_eq!(state["results"]["wf1-p-0"]["status"].as_str().unwrap(), "Skipped");
+    }
+
+    #[tokio::test]
+    async fn one_failure_with_max_failures_zero_returns_failed() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 3, parallel_template(3, ParallelMode::Rolling, Some(0)), None);
+        let mut wf = make_instance();
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Failed(None, Some("err".into())));
+        statuses.insert("wf1-p-2".into(), ChildStatus::Completed(None));
+        let exec = StubExecutor { child_statuses: statuses };
+
+        let result = plugin
+            .execute(&exec, &mut node, &mut wf)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn all_running_returns_await() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 3, parallel_template(3, ParallelMode::Rolling, None), None);
+        let mut wf = make_instance();
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Running);
+        statuses.insert("wf1-p-1".into(), ChildStatus::Running);
+        statuses.insert("wf1-p-2".into(), ChildStatus::Running);
+        let exec = StubExecutor { child_statuses: statuses };
+
+        let result = plugin
+            .execute(&exec, &mut node, &mut wf)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Await);
+        assert!(result.dispatch_jobs.is_empty());
+        assert!(result.dispatch_workflow_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn skipped_counts_as_completed() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 2, parallel_template(2, ParallelMode::Rolling, None), None);
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Skipped(None));
+        let exec = StubExecutor { child_statuses: statuses };
+
+        let result = plugin
+            .execute(&exec, &mut node, &mut wf)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Success);
     }
 
     #[tokio::test]
     async fn all_failed_no_max_failures_returns_failed() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        // total=2, dispatched=2, success=0, failed=1, 1 already processed
-        // max_failures is None (default in template) → any failure means container fails
-        let mut node = make_node("p", 2, 2, 0, 1, 0, vec!["wf1-p-0".into()]);
-        // Override template to have max_failures = None
-        if let TaskTemplate::Parallel(ref mut t) = node.task_instance.task_template {
-            t.max_failures = None;
-        }
-        let mut wf = make_instance();
+        let mut node = make_node("p", 2, parallel_template(2, ParallelMode::Rolling, None), None);
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Failed(None, Some("err".into())));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Failed(None, Some("err".into())));
+        let exec = StubExecutor { child_statuses: statuses };
 
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-1",
-                &NodeExecutionStatus::Failed,
-                &None,
-                &Some("error".into()),
-                &None,
-            )
+            .execute(&exec, &mut node, &mut wf)
             .await
             .unwrap();
 
@@ -642,28 +660,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_failed_with_max_failures_equal_returns_failed() {
+    async fn handle_callback_mixed_running_dispatches_more() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        // total=2, max_failures=Some(2), 1 already failed, this is the 2nd failure
-        // max_failures is an early-abort threshold (>=), so failed_count(2) >= max(2) → abort
-        let mut node = make_node("p", 2, 2, 0, 1, 0, vec!["wf1-p-0".into()]);
-        if let TaskTemplate::Parallel(ref mut t) = node.task_instance.task_template {
-            t.max_failures = Some(2);
-        }
+        let mut node = make_node("p", 3, parallel_template(2, ParallelMode::Rolling, None), Some(json!({
+            "total_items": 3,
+            "dispatched_count": 2,
+            "results": {},
+        })));
         let mut wf = make_instance();
 
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::NotFound);
+        statuses.insert("wf1-p-2".into(), ChildStatus::NotFound);
+        let exec = StubExecutor { child_statuses: statuses };
+
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-1",
-                &NodeExecutionStatus::Failed,
-                &None,
-                &Some("error".into()),
-                &None,
-            )
+            .handle_callback(&exec, &mut node, &mut wf, "wf1-p-0", &NodeExecutionStatus::Success, &None, &None, &None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Await);
+        assert!(result.dispatch_jobs.len() >= 1 || result.dispatch_workflow_jobs.len() >= 1);
+    }
+
+    #[tokio::test]
+    async fn handle_callback_all_terminal_returns_failed() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 2, parallel_template(2, ParallelMode::Rolling, None), None);
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Failed(None, Some("err".into())));
+        let exec = StubExecutor { child_statuses: statuses };
+
+        let result = plugin
+            .handle_callback(&exec, &mut node, &mut wf, "wf1-p-1", &NodeExecutionStatus::Failed, &None, &Some("err".into()), &None)
             .await
             .unwrap();
 
@@ -671,57 +704,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn some_failures_at_completion_still_fails() {
+    async fn batch_mode_waits_for_current_batch() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        // total=3, max_failures=None, success=2, failed=0, now 3rd fails
-        // No early abort (None), but at completion: failed_count(1) > 0 → Failed
-        let mut node = make_node("p", 3, 3, 2, 0, 0, vec!["wf1-p-0".into(), "wf1-p-1".into()]);
-        if let TaskTemplate::Parallel(ref mut t) = node.task_instance.task_template {
-            t.max_failures = None;
-        }
-        let mut wf = make_instance();
+        let mut node = make_node("p", 5, parallel_template(2, ParallelMode::Batch, None), Some(json!({
+            "total_items": 5,
+            "dispatched_count": 2,
+            "results": {},
+        })));
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2), json!(3), json!(4), json!(5)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Running);
+        statuses.insert("wf1-p-1".into(), ChildStatus::Running);
+        statuses.insert("wf1-p-2".into(), ChildStatus::NotFound);
+        statuses.insert("wf1-p-3".into(), ChildStatus::NotFound);
+        statuses.insert("wf1-p-4".into(), ChildStatus::NotFound);
+        let exec = StubExecutor { child_statuses: statuses };
 
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-2",
-                &NodeExecutionStatus::Failed,
-                &None,
-                &Some("error".into()),
-                &None,
-            )
+            .handle_callback(&exec, &mut node, &mut wf, "wf1-p-0", &NodeExecutionStatus::Success, &None, &None, &None)
             .await
             .unwrap();
 
-        assert_eq!(result.status, NodeExecutionStatus::Failed);
+        assert_eq!(result.status, NodeExecutionStatus::Await);
+        assert!(result.dispatch_jobs.is_empty());
+        assert!(result.dispatch_workflow_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_mode_dispatches_next_batch_when_current_completes() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 5, parallel_template(2, ParallelMode::Batch, None), Some(json!({
+            "total_items": 5,
+            "dispatched_count": 2,
+            "results": {},
+        })));
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2), json!(3), json!(4), json!(5)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-2".into(), ChildStatus::NotFound);
+        statuses.insert("wf1-p-3".into(), ChildStatus::NotFound);
+        statuses.insert("wf1-p-4".into(), ChildStatus::NotFound);
+        let exec = StubExecutor { child_statuses: statuses };
+
+        let result = plugin
+            .handle_callback(&exec, &mut node, &mut wf, "wf1-p-1", &NodeExecutionStatus::Success, &None, &None, &None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Await);
+        assert!(result.dispatch_jobs.len() >= 2 || result.dispatch_workflow_jobs.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn empty_items_completes_immediately() {
+        let plugin = ParallelPlugin::new();
+        let mut node = make_node("p", 3, parallel_template(3, ParallelMode::Rolling, None), None);
+        let mut wf = make_instance();
+        wf.context = serde_json::json!({"items": []});
+
+        let exec = StubExecutor {
+            child_statuses: HashMap::new(),
+        };
+
+        let result = plugin
+            .execute(&exec, &mut node, &mut wf)
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, NodeExecutionStatus::Success);
     }
 
     #[tokio::test]
     async fn failures_exceeding_max_triggers_early_abort() {
         let plugin = ParallelPlugin::new();
-        let exec = StubExecutor;
-        // total=5, dispatched=5, success=1, failed=1, max_failures=Some(1)
-        // Now 3rd callback is Failed → failed becomes 2, exceeds max(1) → abort
-        let mut node = make_node("p", 5, 5, 1, 1, 0, vec!["wf1-p-0".into(), "wf1-p-1".into()]);
-        if let TaskTemplate::Parallel(ref mut t) = node.task_instance.task_template {
-            t.max_failures = Some(1);
-        }
-        let mut wf = make_instance();
+        let mut node = make_node("p", 5, parallel_template(5, ParallelMode::Rolling, Some(1)), Some(json!({
+            "total_items": 5,
+            "dispatched_count": 5,
+            "results": {},
+        })));
+        let mut wf = make_instance_with_items(vec![json!(1), json!(2), json!(3), json!(4), json!(5)]);
+
+        let mut statuses = HashMap::new();
+        statuses.insert("wf1-p-0".into(), ChildStatus::Completed(None));
+        statuses.insert("wf1-p-1".into(), ChildStatus::Failed(None, Some("err".into())));
+        statuses.insert("wf1-p-2".into(), ChildStatus::Failed(None, Some("err".into())));
+        statuses.insert("wf1-p-3".into(), ChildStatus::Running);
+        statuses.insert("wf1-p-4".into(), ChildStatus::Running);
+        let exec = StubExecutor { child_statuses: statuses };
 
         let result = plugin
-            .handle_callback(
-                &exec,
-                &mut node,
-                &mut wf,
-                "wf1-p-2",
-                &NodeExecutionStatus::Failed,
-                &None,
-                &Some("error".into()),
-                &None,
-            )
+            .handle_callback(&exec, &mut node, &mut wf, "wf1-p-2", &NodeExecutionStatus::Failed, &None, &Some("err".into()), &None)
             .await
             .unwrap();
 
