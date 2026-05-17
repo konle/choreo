@@ -159,17 +159,24 @@
             <!-- ===== ForkJoin ===== -->
             <template v-else-if="selectedNode.data.nodeType === 'ForkJoin'">
               <a-form-item label="并发度">
-                <a-input-number v-model="selectedNode.data.config.concurrency" :min="1" :disabled="readonly" />
+                <a-input-number v-model="selectedNode.data.config.concurrency" :min="1" :disabled="readonly" @change="pushSnapshot" />
               </a-form-item>
               <a-form-item label="模式">
-                <a-select v-model="selectedNode.data.config.mode" :disabled="readonly">
+                <a-select v-model="selectedNode.data.config.mode" :disabled="readonly" @change="pushSnapshot">
                   <a-option value="Rolling">Rolling</a-option>
                   <a-option value="Batch">Batch</a-option>
                 </a-select>
               </a-form-item>
-              <a-form-item label="子任务 (JSON)">
-                <a-textarea v-model="selectedNode.data.config.tasksJson" :auto-size="{ minRows: 4 }" :disabled="readonly" />
+              <a-form-item label="最大失败数">
+                <a-input-number v-model="selectedNode.data.config.max_failures" :min="0" :disabled="readonly" @change="pushSnapshot" />
               </a-form-item>
+              <ForkJoinTaskPanel
+                :items="selectedNode.data.forkJoinItems"
+                :task-cache="taskCache"
+                :workflow-metas="workflowMetas"
+                :readonly="readonly"
+                @change="onForkJoinPanelChange"
+              />
             </template>
 
             <!-- ===== Pause ===== -->
@@ -231,6 +238,7 @@ import ConditionNode from './condition-node.vue'
 import PublishedTaskRefFields from './published-task-ref-fields.vue'
 import SubworkflowRefFields from './subworkflow-ref-fields.vue'
 import ParallelInnerTaskPanel from './parallel-inner-task-panel.vue'
+import ForkJoinTaskPanel from './forkjoin-task-panel.vue'
 import { buildFormFields, formFieldsToFormArray, type EditorFormField } from './workflow-editor-form-utils'
 import {
   buildParallelTaskTemplateForSave,
@@ -238,6 +246,12 @@ import {
   detectParallelInnerKind,
   hydrateParallelEditorState,
 } from './parallel-inner-task-utils'
+import {
+  type ForkJoinTaskItemEditor,
+  hydrateForkJoinEditorState,
+  buildForkJoinTasksForSave,
+  createEmptyForkJoinTaskItem,
+} from './forkjoin-task-utils'
 
 const customNodeTypes = {
   workflow: markRaw(WorkflowNode),
@@ -295,6 +309,12 @@ function parallelNodeDataDefaults() {
     parallelSubWorkflowVersions: [] as { version: number; nodes?: unknown[] }[],
     parallelSubWorkflowFormFields: [] as EditorFormField[],
     parallelSubWorkflowTimeout: null as number | null,
+  }
+}
+
+function forkJoinNodeDataDefaults() {
+  return {
+    forkJoinItems: [] as ForkJoinTaskItemEditor[],
   }
 }
 
@@ -404,6 +424,17 @@ function onParallelInnerPanelChange() {
   const d = node.data as Record<string, unknown>
   d.label = resolveLabel(node.id, String(d.nodeType), d as any)
   pushSnapshot()
+}
+
+async function refreshForkJoinSubWorkflowVersions(item: ForkJoinTaskItemEditor) {
+  const id = item.subWorkflowMetaId
+  if (!id) return
+  try {
+    const res = await workflowApi.listTemplates(id)
+    item.subWorkflowVersions = res.data
+  } catch {
+    item.subWorkflowVersions = []
+  }
 }
 
 async function refreshParallelSubWorkflowVersions(data: Record<string, unknown>) {
@@ -552,6 +583,7 @@ function onDrop(event: DragEvent) {
     subWorkflowMetaId: null, subWorkflowVersion: null, subWorkflowMeta: null, subWorkflowVersions: [],
   }
   if (type === 'Parallel') Object.assign(baseData, parallelNodeDataDefaults())
+  if (type === 'ForkJoin') Object.assign(baseData, forkJoinNodeDataDefaults())
   const newNode = {
     id,
     type: getVueFlowNodeType(type),
@@ -622,8 +654,26 @@ function validateNodeConfigs(): ValidationError[] {
       }
     }
     if (type === 'ForkJoin') {
-      try { const t = JSON.parse(d.config?.tasksJson || '[]'); if (!Array.isArray(t) || t.length === 0) throw 0 }
-      catch { errors.push({ nodeId: n.id, message: `${n.id}: 子任务列表为空或格式错误` }) }
+      const items = d.forkJoinItems as ForkJoinTaskItemEditor[] | undefined
+      if (!items || items.length === 0) {
+        errors.push({ nodeId: n.id, message: `${n.id}: 子任务列表为空` })
+      } else {
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i]
+          if (!item.task_key?.trim()) {
+            errors.push({ nodeId: n.id, message: `${n.id}: 第 ${i + 1} 个子任务 task_key 为空` })
+          }
+          if ((item.kind === 'Http' || item.kind === 'Grpc' || item.kind === 'Llm') && !item.task_id) {
+            const url = item.kind === 'Http' ? (item.taskSnapshot as any)?.Http?.url : null
+            if (!url || String(url).trim() === '') {
+              errors.push({ nodeId: n.id, message: `${n.id}: 子任务 "${item.task_key}" 请选择${item.kind === 'Http' ? 'HTTP' : item.kind === 'Llm' ? 'LLM' : 'gRPC'}任务模板` })
+            }
+          }
+          if (item.kind === 'SubWorkflow' && (!item.subWorkflowMetaId || item.subWorkflowVersion == null)) {
+            errors.push({ nodeId: n.id, message: `${n.id}: 子任务 "${item.task_key}" 请选择子工作流及版本` })
+          }
+        }
+      }
     }
   }
   return errors
@@ -729,8 +779,9 @@ function buildWorkflowEntity(): any {
             },
           }
           break
-        case 'ForkJoin': {
-          let tasks: any[] = []; try { tasks = JSON.parse(d.config.tasksJson || '[]') } catch {}
+case 'ForkJoin': {
+          const items = (d.forkJoinItems || []) as ForkJoinTaskItemEditor[]
+          const tasks = buildForkJoinTasksForSave(items)
           config = { ForkJoin: { tasks, concurrency: d.config.concurrency || 5, mode: d.config.mode || 'Rolling', max_failures: d.config.max_failures } }; break
         }
         case 'Pause':
@@ -877,6 +928,11 @@ async function loadFromEntity(entity: any) {
       hydrateParallelEditorState(data, taskCache.value, workflowMetas.value)
       if (taskId && !data.parallelInnerTaskId) data.parallelInnerTaskId = taskId
     }
+    if (type === 'ForkJoin') {
+      Object.assign(data, forkJoinNodeDataDefaults())
+      const tasks = n.config?.ForkJoin?.tasks || []
+      data.forkJoinItems = hydrateForkJoinEditorState(tasks, taskCache.value, workflowMetas.value)
+    }
     data.label = resolveLabel(n.node_id, type, data)
 
     return { id: n.node_id, type: getVueFlowNodeType(type), position: { x: pos?.x || 0, y: pos?.y || 0 }, data }
@@ -886,6 +942,13 @@ async function loadFromEntity(entity: any) {
     const d = n.data as Record<string, unknown>
     if (d.nodeType === 'Parallel' && d.parallelInnerKind === 'SubWorkflow' && d.parallelSubWorkflowMetaId) {
       await refreshParallelSubWorkflowVersions(d)
+    }
+    if (d.nodeType === 'ForkJoin' && Array.isArray(d.forkJoinItems)) {
+      for (const item of d.forkJoinItems as ForkJoinTaskItemEditor[]) {
+        if (item.kind === 'SubWorkflow' && item.subWorkflowMetaId) {
+          await refreshForkJoinSubWorkflowVersions(item)
+        }
+      }
     }
   }
 
