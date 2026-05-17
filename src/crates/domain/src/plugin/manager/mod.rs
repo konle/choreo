@@ -8,8 +8,9 @@ mod workflow;
 
 pub use workflow::resolved_llm_request_snapshot;
 
-use crate::plugin::interface::{ExecutionResult, PluginExecutor, PluginInterface};
+use crate::plugin::interface::{ChildStatus, ExecutionResult, PluginExecutor, PluginInterface};
 use crate::shared::workflow::TaskType;
+use crate::task::entity::task_definition::TaskTemplate;
 use crate::task::service::TaskInstanceService;
 use crate::variable::service::VariableService;
 use crate::workflow::entity::workflow_definition::{WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
@@ -17,7 +18,7 @@ use crate::workflow::service::WorkflowInstanceService;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error, warn};
 
 pub struct PluginManager {
     pub(super) plugins: HashMap<TaskType, Box<dyn PluginInterface>>,
@@ -135,6 +136,68 @@ impl PluginExecutor for PluginManager {
                 )
             }
             Err(_) => true,
+        }
+    }
+
+    async fn resolve_child_status(
+        &self,
+        child_task_instance_id: &str,
+        task_template: &TaskTemplate,
+    ) -> ChildStatus {
+        match task_template {
+            TaskTemplate::SubWorkflow(_) => {
+                match self.workflow_instance_svc.get_workflow_instance(child_task_instance_id.to_string()).await {
+                    Ok(wf) => {
+                        use crate::shared::workflow::WorkflowInstanceStatus;
+                        match wf.status {
+                            WorkflowInstanceStatus::Completed => {
+                                ChildStatus::Completed(Some(wf.context.clone()))
+                            }
+                            WorkflowInstanceStatus::Failed => {
+                                ChildStatus::Failed(Some(wf.context.clone()), None)
+                            }
+                            WorkflowInstanceStatus::Pending
+                            | WorkflowInstanceStatus::Running
+                            | WorkflowInstanceStatus::Await
+                            | WorkflowInstanceStatus::Suspended => {
+                                ChildStatus::Running
+                            }
+                            WorkflowInstanceStatus::Canceled => {
+                                ChildStatus::Failed(None, Some("Canceled".into()))
+                            }
+                        }
+                    }
+                    Err(_) => ChildStatus::NotFound,
+                }
+            }
+            _ => {
+                let Some(ref task_svc) = self.task_instance_svc else {
+                    return ChildStatus::NotFound;
+                };
+                match task_svc.get_task_instance_entity(child_task_instance_id.to_string()).await {
+                    Ok(task) => {
+                        use crate::shared::workflow::TaskInstanceStatus;
+                        match task.task_status {
+                            TaskInstanceStatus::Completed => {
+                                ChildStatus::Completed(task.output.clone())
+                            }
+                            TaskInstanceStatus::Failed => {
+                                ChildStatus::Failed(task.output.clone(), task.error_message.clone())
+                            }
+                            TaskInstanceStatus::Skipped => {
+                                ChildStatus::Skipped(task.output.clone())
+                            }
+                            TaskInstanceStatus::Pending | TaskInstanceStatus::Running => {
+                                ChildStatus::Running
+                            }
+                            TaskInstanceStatus::Canceled => {
+                                ChildStatus::Failed(task.output.clone(), Some("Canceled".into()))
+                            }
+                        }
+                    }
+                    Err(_) => ChildStatus::NotFound,
+                }
+            }
         }
     }
 }

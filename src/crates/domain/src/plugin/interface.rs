@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use serde_json::Value as JsonValue;
 use crate::shared::workflow::TaskType;
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob};
+use crate::task::entity::task_definition::TaskTemplate;
 use crate::workflow::entity::workflow_definition::{WorkflowNodeInstanceEntity, WorkflowInstanceEntity, NodeExecutionStatus};
 
 #[derive(Debug, Clone)]
@@ -112,6 +114,33 @@ pub trait PluginExecutor: Send + Sync {
     /// Returns true if the task is still Failed, false otherwise (retried/completed/not found).
     async fn is_task_still_failed(&self, task_instance_id: &str) -> bool {
         let _ = task_instance_id;
-        true // default: assume still failed (conservative)
+        true
     }
+
+    /// Resolve the real-time status of a child task instance.
+    /// Routes to the correct storage (task_instances or workflow_instances) based on task_template type.
+    /// Returns ChildStatus indicating the child's current state.
+    async fn resolve_child_status(
+        &self,
+        child_task_instance_id: &str,
+        task_template: &TaskTemplate,
+    ) -> ChildStatus {
+        let _ = (child_task_instance_id, task_template);
+        ChildStatus::NotFound
+    }
+}
+
+/// Status of a child task resolved from storage (the single source of truth).
+#[derive(Debug, Clone)]
+pub enum ChildStatus {
+    /// Child completed successfully. Carries output if available.
+    Completed(Option<JsonValue>),
+    /// Child failed. Carries output and error_message if available.
+    Failed(Option<JsonValue>, Option<String>),
+    /// Child was skipped. Carries output if available.
+    Skipped(Option<JsonValue>),
+    /// Child is currently running (Pending/Running in storage).
+    Running,
+    /// Child instance not found in storage (not yet created / dispatched).
+    NotFound,
 }

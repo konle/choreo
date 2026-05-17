@@ -767,6 +767,7 @@ impl PluginManager {
                 self.dispatch_outbound_for_transition(instance, &old_status).await;
                 Ok(LoopOutcome::Stop)
             }
+            // 我们工作流只做编排，所以碰到这些状态则标识需要外部或者节点完成之后通知我们。因此我们直接返回stop。
             NodeExecutionStatus::Suspended | NodeExecutionStatus::Await | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
             NodeExecutionStatus::Pending => {
                 instance.nodes[node_index].status = NodeExecutionStatus::Running;
