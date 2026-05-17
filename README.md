@@ -205,3 +205,4 @@ CRUD   /variables                                     # 租户级变量
 
 - [后端架构设计](docs/architecture.md) — 插件系统、并发容器、分布式锁、多租户、变量系统
 - [前端架构设计](docs/frontend-architecture.md) — 技术选型、页面设计、可视化编排器、权限体系
+- [功能展示](docs/gallery.md) — 截图与使用演示
