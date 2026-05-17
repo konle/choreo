@@ -96,8 +96,7 @@ impl ParallelPlugin {
                 .resolve_child_status(&child_task_id, inner_template)
                 .await;
 
-            let child_key = format!("{}", index);
-            result.record(child_key, child_status);
+            result.record(child_task_id.clone(), child_status);
         }
 
         Ok(result)
