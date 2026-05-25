@@ -563,3 +563,701 @@ impl Sweeper {
         count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::entity::{ApprovalInstanceEntity, ApprovalStatus};
+    use crate::approval::repository::ApprovalRepository;
+    use crate::approval::repository::RepositoryError as ApprovalRepoError;
+    use crate::shared::workflow::TaskType as TaskType_;
+    use crate::task::entity::task_definition::{
+        PauseMode, PauseTemplate, TaskInstanceEntity, TaskTemplate as TTemplate, TaskTransitionFields,
+        ApprovalTemplate, ApproverRule, ApprovalMode, SelfApprovalPolicy,
+    };
+    use crate::task::repository::RepositoryError as TaskRepoError;
+    use crate::task::repository::TaskInstanceEntityRepository;
+    use crate::user::entity::TenantRole;
+    use crate::user::entity::UserTenantRole;
+    use crate::user::repository::UserTenantRoleRepository;
+    use crate::workflow::entity::workflow_definition::{
+        NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+    };
+    use crate::workflow::repository::RepositoryError as WfRepoError;
+    use crate::workflow::repository::WorkflowInstanceRepository;
+    use chrono::{Duration, Utc};
+    use common::pagination::PaginatedData;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    // ── Mock Task Dispatcher ─────────────────────────────────────────
+
+    #[derive(Clone)]
+    struct MockDispatcher {
+        dispatched_workflows: Arc<Mutex<Vec<ExecuteWorkflowJob>>>,
+        dispatched_tasks: Arc<Mutex<Vec<ExecuteTaskJob>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskDispatcher for MockDispatcher {
+        async fn dispatch_task(&self, job: ExecuteTaskJob) -> anyhow::Result<()> {
+            self.dispatched_tasks.lock().unwrap().push(job);
+            Ok(())
+        }
+        async fn dispatch_workflow(&self, job: ExecuteWorkflowJob) -> anyhow::Result<()> {
+            self.dispatched_workflows.lock().unwrap().push(job);
+            Ok(())
+        }
+    }
+
+    impl MockDispatcher {
+        fn new() -> Self {
+            Self {
+                dispatched_workflows: Arc::new(Mutex::new(vec![])),
+                dispatched_tasks: Arc::new(Mutex::new(vec![])),
+            }
+        }
+    }
+
+    // ── Mock WorkflowInstanceRepository ──────────────────────────────
+
+    struct MockWfRepo {
+        instances: Mutex<Vec<WorkflowInstanceEntity>>,
+        zombies: Mutex<Vec<WorkflowInstanceEntity>>,
+        by_status: Mutex<Vec<WorkflowInstanceEntity>>,
+        lock_cas_ok: Mutex<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowInstanceRepository for MockWfRepo {
+        async fn get_workflow_instance(&self, id: String) -> Result<WorkflowInstanceEntity, WfRepoError> {
+            let instances = self.instances.lock().unwrap();
+            instances.iter().find(|i| i.workflow_instance_id == id).cloned()
+                .ok_or_else(|| "not found".into())
+        }
+        async fn get_workflow_instance_scoped(&self, _: &str, _: &str) -> Result<WorkflowInstanceEntity, WfRepoError> { unreachable!() }
+        async fn list_workflow_instances(&self, _: &str, _: &crate::workflow::entity::query::WorkflowInstanceQuery) -> Result<PaginatedData<WorkflowInstanceEntity>, WfRepoError> { unreachable!() }
+        async fn transfer_status(&self, id: &str, _: &WorkflowInstanceStatus, _: &WorkflowInstanceStatus) -> Result<WorkflowInstanceEntity, WfRepoError> {
+            let instances = self.instances.lock().unwrap();
+            instances.iter().find(|i| i.workflow_instance_id == id).cloned()
+                .ok_or_else(|| "not found".into())
+        }
+        async fn acquire_lock(&self, _: &str, _: &str, _: u64) -> Result<WorkflowInstanceEntity, WfRepoError> { unreachable!() }
+        async fn release_lock(&self, _: &str, _: &str) -> Result<(), WfRepoError> { Ok(()) }
+        async fn create_workflow_instance(&self, _: &WorkflowInstanceEntity) -> Result<WorkflowInstanceEntity, WfRepoError> { unreachable!() }
+        async fn save_workflow_instance(&self, _: &WorkflowInstanceEntity) -> Result<(), WfRepoError> { Ok(()) }
+        async fn scan_zombie_instances(&self, _: u32) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> {
+            Ok(self.zombies.lock().unwrap().clone())
+        }
+        async fn force_clear_lock(&self, _: &str, _: u64) -> Result<(), WfRepoError> {
+            if *self.lock_cas_ok.lock().unwrap() { Ok(()) } else { Err("CAS conflict".into()) }
+        }
+        async fn scan_instances_by_status(&self, _: &WorkflowInstanceStatus, _: u32) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> {
+            Ok(self.by_status.lock().unwrap().clone())
+        }
+    }
+
+    // ── Mock TaskInstanceEntityRepository ────────────────────────────
+
+    struct MockTaskRepo {
+        instances: Mutex<Vec<TaskInstanceEntity>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskInstanceEntityRepository for MockTaskRepo {
+        async fn create_task_instance_entity(&self, _: TaskInstanceEntity) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
+        async fn get_task_instance_entity(&self, id: String) -> Result<TaskInstanceEntity, TaskRepoError> {
+            let instances = self.instances.lock().unwrap();
+            instances.iter().find(|t| t.task_instance_id == id).cloned()
+                .ok_or_else(|| "task instance not found".into())
+        }
+        async fn get_task_instance_entity_scoped(&self, _: &str, _: &str) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
+        async fn list_task_instance_entities(&self, _: &crate::task::entity::query::TaskInstanceQuery) -> Result<PaginatedData<TaskInstanceEntity>, TaskRepoError> { unreachable!() }
+        async fn update_task_instance_entity(&self, _: TaskInstanceEntity) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
+        async fn transfer_status_with_fields(&self, _: &str, _: &TaskInstanceStatus, _: &TaskInstanceStatus, _: TaskTransitionFields) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
+    }
+
+    // ── Mock ApprovalRepository ──────────────────────────────────────
+
+    struct MockApprovalRepo;
+
+    #[async_trait::async_trait]
+    impl ApprovalRepository for MockApprovalRepo {
+        async fn create(&self, _: &ApprovalInstanceEntity) -> Result<ApprovalInstanceEntity, ApprovalRepoError> { unreachable!() }
+        async fn get_by_id(&self, _: &str, _: &str) -> Result<ApprovalInstanceEntity, ApprovalRepoError> { unreachable!() }
+        async fn update(&self, e: &ApprovalInstanceEntity) -> Result<ApprovalInstanceEntity, ApprovalRepoError> { Ok(e.clone()) }
+        async fn find_by_workflow_and_node(&self, _: &str, _: &str, _: &str) -> Result<Option<ApprovalInstanceEntity>, ApprovalRepoError> { unreachable!() }
+        async fn list_pending_by_approver(&self, _: &str, _: &str) -> Result<Vec<ApprovalInstanceEntity>, ApprovalRepoError> { Ok(vec![]) }
+        async fn list_by_tenant(&self, _: &str) -> Result<Vec<ApprovalInstanceEntity>, ApprovalRepoError> { Ok(vec![]) }
+        async fn scan_expired_approvals(&self, _: u32) -> Result<Vec<ApprovalInstanceEntity>, ApprovalRepoError> {
+            Ok(vec![
+                ApprovalInstanceEntity {
+                    id: "approval-1".into(),
+                    tenant_id: "t1".into(),
+                    workflow_instance_id: "wf1".into(),
+                    node_id: "a1".into(),
+                    title: "".into(), description: None,
+                    approval_mode: ApprovalMode::Any,
+                    approvers: vec![], decisions: vec![],
+                    status: ApprovalStatus::Pending,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    expires_at: Some(Utc::now() - Duration::hours(1)),
+                    applicant_id: None,
+                },
+            ])
+        }
+    }
+
+    // ── Mock UserTenantRoleRepository ────────────────────────────────
+
+    struct MockRoleRepo;
+
+    #[async_trait::async_trait]
+    impl UserTenantRoleRepository for MockRoleRepo {
+        async fn assign_role(&self, _: &str, _: &str, _: &TenantRole) -> Result<UserTenantRole, ApprovalRepoError> { unreachable!() }
+        async fn get_role(&self, _: &str, _: &str) -> Result<UserTenantRole, ApprovalRepoError> { unreachable!() }
+        async fn list_by_tenant(&self, _: &str) -> Result<Vec<UserTenantRole>, ApprovalRepoError> { Ok(vec![]) }
+        async fn list_by_user(&self, _: &str) -> Result<Vec<UserTenantRole>, ApprovalRepoError> { Ok(vec![]) }
+        async fn remove_role(&self, _: &str, _: &str) -> Result<(), ApprovalRepoError> { Ok(()) }
+        async fn list_users_by_role(&self, _: &str, _: &str) -> Result<Vec<UserTenantRole>, ApprovalRepoError> { Ok(vec![]) }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn make_instance(id: &str, status: WorkflowInstanceStatus, current_node: &str, nodes: Vec<WorkflowNodeInstanceEntity>) -> WorkflowInstanceEntity {
+        WorkflowInstanceEntity {
+            workflow_instance_id: id.into(),
+            tenant_id: "t1".into(),
+            workflow_meta_id: "m1".into(),
+            workflow_version: 1,
+            status,
+            created_at: Utc::now(), updated_at: Utc::now(), deleted_at: None,
+            context: serde_json::json!({}),
+            entry_node: current_node.into(),
+            current_node: current_node.into(),
+            nodes,
+            epoch: 1,
+            locked_by: Some("previous-worker".into()),
+            locked_duration: Some(30000),
+            locked_at: Some(Utc::now() - Duration::minutes(5)),
+            parent_context: None, depth: 0, created_by: None,
+        }
+    }
+
+    fn default_task_instance() -> TaskInstanceEntity {
+        let now = Utc::now();
+        TaskInstanceEntity {
+            id: "".into(), tenant_id: "".into(), task_id: "".into(),
+            task_name: "".into(), task_type: TaskType_::Http,
+            task_template: TTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            }),
+            task_status: TaskInstanceStatus::Pending,
+            task_instance_id: "".into(),
+            created_at: now, updated_at: now, deleted_at: None,
+            input: None, output: None, error_message: None,
+            execution_duration: None, caller_context: None,
+        }
+    }
+
+    fn make_node(node_id: &str, node_status: NodeExecutionStatus, task_type: TaskType_, template: TTemplate) -> WorkflowNodeInstanceEntity {
+        let now = Utc::now();
+        WorkflowNodeInstanceEntity {
+            node_id: node_id.into(),
+            node_type: task_type.clone(),
+            task_instance: TaskInstanceEntity {
+                id: format!("ti-{}", node_id),
+                tenant_id: "t1".into(),
+                task_id: "".into(),
+                task_name: node_id.into(),
+                task_type: task_type,
+                task_template: template,
+                task_status: TaskInstanceStatus::Pending,
+                task_instance_id: format!("wf1-{}", node_id),
+                created_at: now, updated_at: now, deleted_at: None,
+                input: None, output: None, error_message: None, execution_duration: None,
+                caller_context: None,
+            },
+            context: serde_json::json!({}),
+            next_node: None,
+            status: node_status,
+            error_message: None, created_at: now, updated_at: now,
+        }
+    }
+
+    fn make_sweeper(
+        wf_repo: Arc<MockWfRepo>,
+        task_repo: Arc<MockTaskRepo>,
+        dispatcher: Arc<MockDispatcher>,
+        with_approval: bool,
+    ) -> Sweeper {
+        let ti_svc = Arc::new(TaskInstanceService::new(task_repo));
+        let wf_svc = Arc::new(WorkflowInstanceService::new(wf_repo, ti_svc.clone()));
+        let mut sweeper = Sweeper::new(
+            wf_svc,
+            ti_svc,
+            dispatcher,
+            SweeperConfig { interval_secs: 60, max_recover_per_cycle: 10 },
+        );
+        if with_approval {
+            let approval_repo = Arc::new(MockApprovalRepo);
+            let role_repo = Arc::new(MockRoleRepo);
+            let approval_svc = ApprovalService::new(approval_repo, role_repo);
+            sweeper = sweeper.with_approval_service(approval_svc);
+        }
+        sweeper
+    }
+
+    // ── Tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_cycle_no_zombies_does_nothing() {
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![]),
+            zombies: Mutex::new(vec![]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        assert!(dispatcher.dispatched_workflows.lock().unwrap().is_empty());
+        assert!(dispatcher.dispatched_tasks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_cycle_cas_failure_skips_instance() {
+        let node = make_node("n1", NodeExecutionStatus::Pending, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Running, "n1", vec![node]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance]),
+            zombies: Mutex::new(vec![make_instance("wf1", WorkflowInstanceStatus::Running, "n1", vec![])]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(false),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        assert!(dispatcher.dispatched_workflows.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_running_instance_with_pending_node_restarts_via_start() {
+        let node = make_node("n1", NodeExecutionStatus::Pending, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Running, "n1", vec![node]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].workflow_instance_id, "wf1");
+        assert!(matches!(workflows[0].event, WorkflowEvent::Start));
+    }
+
+    #[tokio::test]
+    async fn recover_running_instance_with_await_node_delegates_to_recover_await() {
+        let node = make_node("a1", NodeExecutionStatus::Await, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/cb".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Running, "a1", vec![node]);
+        let completed_task = TaskInstanceEntity {
+            task_instance_id: "wf1-a1".into(),
+            task_status: TaskInstanceStatus::Completed,
+            output: Some(serde_json::json!({"result": "ok"})),
+            ..default_task_instance()
+        };
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![completed_task]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        match &workflows[0].event {
+            WorkflowEvent::NodeCallback { node_id, child_task_id, status, .. } => {
+                assert_eq!(node_id, "a1");
+                assert_eq!(child_task_id, "wf1-a1");
+                assert_eq!(*status, NodeExecutionStatus::Success);
+            }
+            _ => panic!("expected NodeCallback"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_running_instance_with_suspended_node_delegates_to_recover_await() {
+        let node = make_node("p1", NodeExecutionStatus::Suspended, TaskType_::Pause, TTemplate::Pause(PauseTemplate {
+            wait_seconds: 60, mode: PauseMode::Auto,
+        }));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Running, "p1", vec![node]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        // Since task not found → restart_via_start
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert!(matches!(workflows[0].event, WorkflowEvent::Start));
+    }
+
+    #[tokio::test]
+    async fn recover_await_single_completed_task_supplements_callback() {
+        let node = make_node("h1", NodeExecutionStatus::Await, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/cb".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Await, "h1", vec![node]);
+        let completed = TaskInstanceEntity {
+            task_instance_id: "wf1-h1".into(),
+            task_status: TaskInstanceStatus::Completed,
+            output: Some(serde_json::json!({"result": "done"})),
+            ..default_task_instance()
+        };
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![completed]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        match &workflows[0].event {
+            WorkflowEvent::NodeCallback { node_id, child_task_id, status, output, .. } => {
+                assert_eq!(node_id, "h1");
+                assert_eq!(child_task_id, "wf1-h1");
+                assert_eq!(*status, NodeExecutionStatus::Success);
+                assert_eq!(output.as_ref().unwrap()["result"], "done");
+            }
+            _ => panic!("expected NodeCallback"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_await_single_failed_task_supplements_callback() {
+        let node = make_node("h2", NodeExecutionStatus::Await, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/fail".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf2", WorkflowInstanceStatus::Await, "h2", vec![node]);
+        let failed = TaskInstanceEntity {
+            task_instance_id: "wf2-h2".into(),
+            task_status: TaskInstanceStatus::Failed,
+            error_message: Some("timeout".into()),
+            ..default_task_instance()
+        };
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![failed]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        match &workflows[0].event {
+            WorkflowEvent::NodeCallback { status, error_message, .. } => {
+                assert_eq!(*status, NodeExecutionStatus::Failed);
+                assert_eq!(error_message.as_ref().unwrap(), "timeout");
+            }
+            _ => panic!("expected NodeCallback"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_await_single_stale_task_redispatches() {
+        let node = make_node("h3", NodeExecutionStatus::Await, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/stale".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf3", WorkflowInstanceStatus::Await, "h3", vec![node]);
+        let stale = TaskInstanceEntity {
+            task_instance_id: "wf3-h3".into(),
+            task_status: TaskInstanceStatus::Pending,
+            ..default_task_instance()
+        };
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![stale]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let tasks = dispatcher.dispatched_tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_instance_id, "wf3-h3");
+    }
+
+    #[tokio::test]
+    async fn recover_await_single_no_task_restarts_via_start() {
+        let node = make_node("h4", NodeExecutionStatus::Await, TaskType_::Http, TTemplate::Http(
+            crate::task::entity::task_definition::TaskHttpTemplate {
+                url: "/new".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+                headers: vec![], body: vec![], form: vec![],
+                retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+            },
+        ));
+        let instance = make_instance("wf4", WorkflowInstanceStatus::Await, "h4", vec![node]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 1);
+        assert!(matches!(workflows[0].event, WorkflowEvent::Start));
+    }
+
+    #[tokio::test]
+    async fn recover_await_container_mixed_states() {
+        use crate::task::entity::task_definition::ForkJoinTemplate;
+        let template = TTemplate::ForkJoin(ForkJoinTemplate {
+            tasks: vec![], concurrency: 2, mode: crate::task::entity::task_definition::ParallelMode::Batch,
+            max_failures: None,
+        });
+        let mut node = make_node("fj1", NodeExecutionStatus::Await, TaskType_::ForkJoin, template);
+        node.task_instance.output = Some(serde_json::json!({
+            "total_items": 3,
+            "dispatched_count": 3,
+            "success_count": 1,
+            "failed_count": 0,
+        }));
+
+        let instance = make_instance("wf5", WorkflowInstanceStatus::Await, "fj1", vec![node]);
+        let completed = TaskInstanceEntity {
+            task_instance_id: "wf5-fj1-0".into(),
+            task_status: TaskInstanceStatus::Completed,
+            output: Some(serde_json::json!({"idx": 0})),
+            ..default_task_instance()
+        };
+        let failed = TaskInstanceEntity {
+            task_instance_id: "wf5-fj1-1".into(),
+            task_status: TaskInstanceStatus::Failed,
+            error_message: Some("fail".into()),
+            ..default_task_instance()
+        };
+        let stale = TaskInstanceEntity {
+            task_instance_id: "wf5-fj1-2".into(),
+            task_status: TaskInstanceStatus::Running,
+            ..default_task_instance()
+        };
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone()]),
+            zombies: Mutex::new(vec![instance]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![completed, failed, stale]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        assert_eq!(workflows.len(), 2); // 2 callbacks supplemented (completed + failed)
+        let tasks = dispatcher.dispatched_tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 1); // 1 stale task redispatched
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_approvals_rejects_and_dispatches_callback() {
+        let node = make_node("a1", NodeExecutionStatus::Suspended, TaskType_::Approval, TTemplate::Approval(ApprovalTemplate {
+            name: "approve".into(), title: "test".into(), description: None,
+            approvers: vec![ApproverRule::User("u1".into())],
+            approval_mode: ApprovalMode::Any, timeout: Some(1),
+            self_approval: SelfApprovalPolicy::Skip,
+        }));
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Suspended, "a1", vec![node]);
+        // Add a dummy zombie so run_cycle doesn't return early before sweep_expired_approvals
+        let dummy_zombie = make_instance("zombie", WorkflowInstanceStatus::Running, "dummy", vec![make_node("dummy", NodeExecutionStatus::Success, TaskType_::Http, TTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
+            url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+            headers: vec![], body: vec![], form: vec![],
+            retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+        }))]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone(), dummy_zombie.clone()]),
+            zombies: Mutex::new(vec![dummy_zombie]),
+            by_status: Mutex::new(vec![]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), true);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        let approval_callbacks: Vec<_> = workflows.iter().filter(|w| {
+            matches!(&w.event, WorkflowEvent::NodeCallback { node_id, .. } if node_id == "a1")
+        }).collect();
+        assert_eq!(approval_callbacks.len(), 1);
+        match &approval_callbacks[0].event {
+            WorkflowEvent::NodeCallback { status, error_message, .. } => {
+                assert_eq!(*status, NodeExecutionStatus::Failed);
+                assert_eq!(error_message.as_ref().unwrap(), "approval expired");
+            }
+            _ => panic!("expected NodeCallback"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_pause_auto_nodes_awaken() {
+        let now = Utc::now();
+        let past = now - Duration::seconds(10);
+        let mut node = make_node("p1", NodeExecutionStatus::Suspended, TaskType_::Pause, TTemplate::Pause(PauseTemplate {
+            wait_seconds: 5, mode: PauseMode::Auto,
+        }));
+        node.task_instance.output = Some(serde_json::json!({
+            "resume_at": past.to_rfc3339(),
+            "mode": "Auto",
+            "wait_seconds": 5,
+        }));
+
+        let instance = make_instance("wf1", WorkflowInstanceStatus::Suspended, "p1", vec![node]);
+        // Add a dummy zombie so run_cycle doesn't return early before sweep_expired_pause_nodes
+        let dummy_zombie = make_instance("zombie", WorkflowInstanceStatus::Running, "dummy", vec![make_node("dummy", NodeExecutionStatus::Success, TaskType_::Http, TTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
+            url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+            headers: vec![], body: vec![], form: vec![],
+            retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+        }))]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone(), dummy_zombie.clone()]),
+            zombies: Mutex::new(vec![dummy_zombie]),
+            by_status: Mutex::new(vec![instance]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        let pause_callbacks: Vec<_> = workflows.iter().filter(|w| {
+            matches!(&w.event, WorkflowEvent::NodeCallback { node_id, .. } if node_id == "p1")
+        }).collect();
+        assert_eq!(pause_callbacks.len(), 1);
+        match &pause_callbacks[0].event {
+            WorkflowEvent::NodeCallback { status, .. } => {
+                assert_eq!(*status, NodeExecutionStatus::Success);
+            }
+            _ => panic!("expected NodeCallback"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_expired_pause_manual_nodes_ignored() {
+        let now = Utc::now();
+        let past = now - Duration::seconds(10);
+        let mut node = make_node("p2", NodeExecutionStatus::Suspended, TaskType_::Pause, TTemplate::Pause(PauseTemplate {
+            wait_seconds: 0, mode: PauseMode::Manual,
+        }));
+        node.task_instance.output = Some(serde_json::json!({
+            "resume_at": past.to_rfc3339(),
+            "mode": "Manual",
+        }));
+
+        let instance = make_instance("wf2", WorkflowInstanceStatus::Suspended, "p2", vec![node]);
+        let dummy_zombie = make_instance("zombie", WorkflowInstanceStatus::Running, "dummy", vec![make_node("dummy", NodeExecutionStatus::Success, TaskType_::Http, TTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
+            url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
+            headers: vec![], body: vec![], form: vec![],
+            retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+        }))]);
+        let wf_repo = Arc::new(MockWfRepo {
+            instances: Mutex::new(vec![instance.clone(), dummy_zombie.clone()]),
+            zombies: Mutex::new(vec![dummy_zombie]),
+            by_status: Mutex::new(vec![instance]),
+            lock_cas_ok: Mutex::new(true),
+        });
+        let task_repo = Arc::new(MockTaskRepo { instances: Mutex::new(vec![]) });
+        let dispatcher = Arc::new(MockDispatcher::new());
+
+        let sweeper = make_sweeper(wf_repo, task_repo, dispatcher.clone(), false);
+        sweeper.run_cycle().await;
+
+        let workflows = dispatcher.dispatched_workflows.lock().unwrap();
+        let pause_callbacks: Vec<_> = workflows.iter().filter(|w| {
+            matches!(&w.event, WorkflowEvent::NodeCallback { node_id, .. } if node_id == "p2")
+        }).collect();
+        assert_eq!(pause_callbacks.len(), 0, "manual pause nodes should not be auto-resumed");
+    }
+}
