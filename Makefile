@@ -50,3 +50,19 @@ clean:
 	cargo clean
 	docker compose -f deploy/docker-compose.dev.yml down -v
 	docker compose -f deploy/docker-compose.yml down -v
+
+# ── Code Quality Gates ───────────────────────────────────────────
+# Generate coverage report (required before "crap" check)
+coverage:
+	cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+# Run CRAP analysis with gate (fail if any function exceeds threshold)
+crap:
+	cargo crap --workspace --lcov lcov.info --fail-above
+
+# Generate coverage + run CRAP gate in one step
+qc: coverage crap
+
+# Save a baseline (run on main branch only)
+crap-baseline:
+	cargo crap --workspace --lcov lcov.info --format json --output baseline.json

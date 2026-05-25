@@ -1,3 +1,5 @@
 /target
 *.md
 .cursor
+lcov.info
+baseline.json
