@@ -4,27 +4,35 @@ use axum::{
     middleware::from_fn,
     routing::{get, post},
 };
-use tracing::{info, error};
+use domain::workflow::{
+    entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity},
+    service::{WorkflowDefinitionService, WorkflowInstanceService, node_callback_child_task_id},
+};
 use domain::{
-    shared::{job::{ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext, WorkflowEvent}, workflow::{TaskType, WorkflowInstanceStatus, WorkflowStatus}},
+    shared::{
+        job::{
+            ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext,
+            WorkflowEvent,
+        },
+        workflow::{TaskType, WorkflowInstanceStatus, WorkflowStatus},
+    },
     user::entity::Permission,
     workflow::entity::query::WorkflowInstanceQuery,
 };
-use domain::workflow::{
-    entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity},
-    service::{node_callback_child_task_id, WorkflowDefinitionService, WorkflowInstanceService},
-};
+use tracing::{error, info};
 
 use common::pagination::PaginatedData;
 
 use crate::error::ApiError;
+use crate::handler::workflow::workflow_instance_request::{
+    CreateWorkflowInstanceRequest, ListWorkflowInstancesRequest, ResumeNodeRequest,
+    RetryWorkflowNodeRequest, SkipWorkflowNodeRequest,
+};
 use crate::middleware::auth::AuthContext;
 use crate::middleware::permission::require_permission;
 use crate::middleware::permission_guard::{PermissionLevel, RequireDraftInstanceCreate};
 use crate::response::response::Response;
-use crate::handler::workflow::workflow_instance_request::{CreateWorkflowInstanceRequest, RetryWorkflowNodeRequest, SkipWorkflowNodeRequest, ListWorkflowInstancesRequest, ResumeNodeRequest};
 use std::sync::Arc;
-
 
 #[derive(Clone)]
 pub struct WorkflowInstanceHandler {
@@ -39,7 +47,11 @@ impl WorkflowInstanceHandler {
         instance_service: WorkflowInstanceService,
         dispatcher: Arc<dyn TaskDispatcher>,
     ) -> Self {
-        Self { definition_service, instance_service, dispatcher }
+        Self {
+            definition_service,
+            instance_service,
+            dispatcher,
+        }
     }
 }
 
@@ -58,10 +70,7 @@ pub fn routes(handler: Arc<WorkflowInstanceHandler>) -> Router {
         .route("/{id}/resume-node", post(resume_node))
         .layer(from_fn(require_permission(Permission::InstanceExecute)));
 
-    Router::new()
-        .merge(reads)
-        .merge(writes)
-        .with_state(handler)
+    Router::new().merge(reads).merge(writes).with_state(handler)
 }
 
 async fn create_instance(
@@ -69,11 +78,13 @@ async fn create_instance(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateWorkflowInstanceRequest>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    handler.definition_service
+    handler
+        .definition_service
         .get_workflow_meta_entity_scoped(&auth.tenant_id, &req.workflow_meta_id)
         .await?;
 
-    let workflow_entity = handler.definition_service
+    let workflow_entity = handler
+        .definition_service
         .get_workflow_entity(req.workflow_meta_id, req.version)
         .await?;
 
@@ -83,12 +94,22 @@ async fn create_instance(
         }
         WorkflowStatus::Published => {}
         _ => {
-            return Err(ApiError::bad_request("workflow is not a draft or published"));
+            return Err(ApiError::bad_request(
+                "workflow is not a draft or published",
+            ));
         }
     }
 
-    let instance = handler.instance_service
-        .create_instance(&auth.tenant_id, &workflow_entity, req.context, None, 0, Some(auth.user_id.clone()))
+    let instance = handler
+        .instance_service
+        .create_instance(
+            &auth.tenant_id,
+            &workflow_entity,
+            req.context,
+            None,
+            0,
+            Some(auth.user_id.clone()),
+        )
         .await?;
 
     info!(
@@ -100,8 +121,6 @@ async fn create_instance(
     Ok(Json(Response::success(instance)))
 }
 
-
-
 async fn list_instances(
     State(handler): State<Arc<WorkflowInstanceHandler>>,
     Extension(auth): Extension<AuthContext>,
@@ -109,8 +128,14 @@ async fn list_instances(
 ) -> Result<Json<Response<PaginatedData<WorkflowInstanceEntity>>>, ApiError> {
     let mut query = WorkflowInstanceQuery::from(req);
     query.tenant_id = auth.tenant_id.clone();
-    info!("list_instances query: {:?} tenant_id: {}", query, auth.tenant_id);
-    let result = handler.instance_service.list_workflow_instances(&auth.tenant_id, &query).await?;
+    info!(
+        "list_instances query: {:?} tenant_id: {}",
+        query, auth.tenant_id
+    );
+    let result = handler
+        .instance_service
+        .list_workflow_instances(&auth.tenant_id, &query)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -119,7 +144,10 @@ async fn get_instance(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    let result = handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
+    let result = handler
+        .instance_service
+        .get_workflow_instance_scoped(&auth.tenant_id, &id)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -128,7 +156,10 @@ async fn execute_instance(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    let instance = handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
+    let instance = handler
+        .instance_service
+        .get_workflow_instance_scoped(&auth.tenant_id, &id)
+        .await?;
 
     if instance.status != WorkflowInstanceStatus::Pending {
         return Err(ApiError::bad_request(format!(
@@ -137,14 +168,18 @@ async fn execute_instance(
         )));
     }
 
-    handler.dispatcher.dispatch_workflow(ExecuteWorkflowJob {
-        workflow_instance_id: id.clone(),
-        tenant_id: auth.tenant_id,
-        event: WorkflowEvent::Start,
-    }).await.map_err(|e| {
-        error!(workflow_instance_id = %id, error = %e, "failed to dispatch workflow execution");
-        ApiError::internal(e.to_string())
-    })?;
+    handler
+        .dispatcher
+        .dispatch_workflow(ExecuteWorkflowJob {
+            workflow_instance_id: id.clone(),
+            tenant_id: auth.tenant_id,
+            event: WorkflowEvent::Start,
+        })
+        .await
+        .map_err(|e| {
+            error!(workflow_instance_id = %id, error = %e, "failed to dispatch workflow execution");
+            ApiError::internal(e.to_string())
+        })?;
 
     info!(workflow_instance_id = %id, "workflow execution dispatched");
 
@@ -156,7 +191,10 @@ async fn cancel_instance(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
+    handler
+        .instance_service
+        .get_workflow_instance_scoped(&auth.tenant_id, &id)
+        .await?;
     let result = handler.instance_service.cancel_instance(&id).await?;
     info!(workflow_instance_id = %id, "workflow instance cancelled");
     Ok(Json(Response::success(result)))
@@ -175,7 +213,12 @@ async fn retry_node(
 
     let updated = handler
         .instance_service
-        .retry_workflow_node(&auth.tenant_id, &id, &req.node_id, req.child_task_id.clone())
+        .retry_workflow_node(
+            &auth.tenant_id,
+            &id,
+            &req.node_id,
+            req.child_task_id.clone(),
+        )
         .await
         .map_err(ApiError::bad_request)?;
 
@@ -193,10 +236,7 @@ async fn retry_node(
         // dispatches both the task execution and the RetryContainerChild event
         // to the Workflow Worker (which safely rollbacks container state under lock).
         let cid = req.child_task_id.as_ref().unwrap();
-        let item_index = cid
-            .rsplit('-')
-            .next()
-            .and_then(|s| s.parse::<usize>().ok());
+        let item_index = cid.rsplit('-').next().and_then(|s| s.parse::<usize>().ok());
 
         let caller_context = WorkflowCallerContext {
             workflow_instance_id: updated.workflow_instance_id.clone(),
@@ -260,7 +300,10 @@ async fn resume_instance(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    handler.instance_service.get_workflow_instance_scoped(&auth.tenant_id, &id).await?;
+    handler
+        .instance_service
+        .get_workflow_instance_scoped(&auth.tenant_id, &id)
+        .await?;
     let result = handler.instance_service.resume_instance(&id).await?;
     info!(workflow_instance_id = %id, "workflow instance resumed");
     Ok(Json(Response::success(result)))
@@ -279,7 +322,13 @@ async fn skip_node(
 
     let updated = handler
         .instance_service
-        .skip_workflow_node(&auth.tenant_id, &id, &req.node_id, req.child_task_id.clone(), req.output.clone())
+        .skip_workflow_node(
+            &auth.tenant_id,
+            &id,
+            &req.node_id,
+            req.child_task_id.clone(),
+            req.output.clone(),
+        )
         .await
         .map_err(ApiError::bad_request)?;
 
@@ -328,7 +377,7 @@ async fn resume_node(
     Path(id): Path<String>,
     Json(req): Json<ResumeNodeRequest>,
 ) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    use domain::task::entity::task_definition::{TaskTemplate, PauseMode};
+    use domain::task::entity::task_definition::{PauseMode, TaskTemplate};
 
     let instance = handler
         .instance_service
@@ -343,13 +392,16 @@ async fn resume_node(
 
     if node.status != NodeExecutionStatus::Suspended {
         return Err(ApiError::bad_request(format!(
-            "Node {} is not suspended (current: {:?})", req.node_id, node.status
+            "Node {} is not suspended (current: {:?})",
+            req.node_id, node.status
         )));
     }
 
     let is_manual_pause = matches!(&node.task_instance.task_template, TaskTemplate::Pause(t) if t.mode == PauseMode::Manual);
     if !is_manual_pause {
-        return Err(ApiError::bad_request("resume-node only applies to Manual Pause nodes"));
+        return Err(ApiError::bad_request(
+            "resume-node only applies to Manual Pause nodes",
+        ));
     }
 
     let resume_at = node
@@ -399,4 +451,3 @@ async fn resume_node(
 
     Ok(Json(Response::success(updated)))
 }
-

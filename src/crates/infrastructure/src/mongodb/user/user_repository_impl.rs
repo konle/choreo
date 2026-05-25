@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use mongodb::{Client, Collection, Database};
-use mongodb::bson::doc;
-use domain::user::entity::{UserEntity, UserTenantRole, TenantRole};
-use domain::user::repository::{UserRepository, UserTenantRoleRepository, RepositoryError};
 use chrono::Utc;
+use domain::user::entity::{TenantRole, UserEntity, UserTenantRole};
+use domain::user::repository::{RepositoryError, UserRepository, UserTenantRoleRepository};
+use mongodb::bson::doc;
+use mongodb::{Client, Collection, Database};
 
 pub struct UserRepositoryImpl {
     collection: Collection<UserEntity>,
@@ -59,7 +59,12 @@ impl UserTenantRoleRepositoryImpl {
 
 #[async_trait]
 impl UserTenantRoleRepository for UserTenantRoleRepositoryImpl {
-    async fn assign_role(&self, user_id: &str, tenant_id: &str, role: &TenantRole) -> Result<UserTenantRole, RepositoryError> {
+    async fn assign_role(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        role: &TenantRole,
+    ) -> Result<UserTenantRole, RepositoryError> {
         let filter = doc! { "user_id": user_id, "tenant_id": tenant_id };
         self.collection.delete_many(filter).await?;
 
@@ -73,16 +78,32 @@ impl UserTenantRoleRepository for UserTenantRoleRepositoryImpl {
         Ok(entity)
     }
 
-    async fn get_role(&self, user_id: &str, tenant_id: &str) -> Result<UserTenantRole, RepositoryError> {
+    async fn get_role(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<UserTenantRole, RepositoryError> {
         self.collection
             .find_one(doc! { "user_id": user_id, "tenant_id": tenant_id })
             .await?
-            .ok_or_else(|| format!("role not found for user {} in tenant {}", user_id, tenant_id).into())
+            .ok_or_else(|| {
+                format!(
+                    "role not found for user {} in tenant {}",
+                    user_id, tenant_id
+                )
+                .into()
+            })
     }
 
-    async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<UserTenantRole>, RepositoryError> {
+    async fn list_by_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<UserTenantRole>, RepositoryError> {
         use futures::TryStreamExt;
-        let cursor = self.collection.find(doc! { "tenant_id": tenant_id }).await?;
+        let cursor = self
+            .collection
+            .find(doc! { "tenant_id": tenant_id })
+            .await?;
         Ok(cursor.try_collect().await?)
     }
 
@@ -99,9 +120,16 @@ impl UserTenantRoleRepository for UserTenantRoleRepositoryImpl {
         Ok(())
     }
 
-    async fn list_users_by_role(&self, tenant_id: &str, role: &str) -> Result<Vec<UserTenantRole>, RepositoryError> {
+    async fn list_users_by_role(
+        &self,
+        tenant_id: &str,
+        role: &str,
+    ) -> Result<Vec<UserTenantRole>, RepositoryError> {
         use futures::TryStreamExt;
-        let cursor = self.collection.find(doc! { "tenant_id": tenant_id, "role": role }).await?;
+        let cursor = self
+            .collection
+            .find(doc! { "tenant_id": tenant_id, "role": role })
+            .await?;
         Ok(cursor.try_collect().await?)
     }
 }

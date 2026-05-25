@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use chrono::{Duration, Utc};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::approval::entity::{
-    ApprovalDecision, ApprovalInstanceEntity, ApprovalStatus, Decision,
-};
+use crate::approval::entity::{ApprovalDecision, ApprovalInstanceEntity, ApprovalStatus, Decision};
 use crate::approval::repository::{ApprovalRepository, RepositoryError};
-use crate::task::entity::task_definition::{ApprovalMode, ApprovalTemplate, ApproverRule, SelfApprovalPolicy};
+use crate::task::entity::task_definition::{
+    ApprovalMode, ApprovalTemplate, ApproverRule, SelfApprovalPolicy,
+};
 use crate::user::repository::UserTenantRoleRepository;
 
 #[derive(Clone)]

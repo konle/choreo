@@ -1,11 +1,13 @@
 use async_trait::async_trait;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::plugin::interface::{ExecutionResult, PluginExecutor, PluginInterface};
 use crate::shared::job::{ExecuteWorkflowJob, WorkflowCallerContext, WorkflowEvent};
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::TaskTemplate;
-use crate::workflow::entity::workflow_definition::{WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+use crate::workflow::entity::workflow_definition::{
+    WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+};
 use crate::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 
 const MAX_SUB_WORKFLOW_DEPTH: u32 = 10;
@@ -20,7 +22,10 @@ impl SubWorkflowPlugin {
         definition_svc: WorkflowDefinitionService,
         instance_svc: WorkflowInstanceService,
     ) -> Self {
-        Self { definition_svc, instance_svc }
+        Self {
+            definition_svc,
+            instance_svc,
+        }
     }
 }
 
@@ -36,7 +41,9 @@ impl PluginInterface for SubWorkflowPlugin {
             TaskTemplate::SubWorkflow(t) => t,
             other => {
                 error!(node_id = %node_instance.node_id, template = ?other, "invalid template for SubWorkflowPlugin");
-                return Err(anyhow::anyhow!("Invalid task template for SubWorkflowPlugin"));
+                return Err(anyhow::anyhow!(
+                    "Invalid task template for SubWorkflowPlugin"
+                ));
             }
         };
 
@@ -48,7 +55,11 @@ impl PluginInterface for SubWorkflowPlugin {
             .and_then(|o| o.get("child_workflow_instance_id"))
             .and_then(|v| v.as_str())
         {
-            match self.instance_svc.get_workflow_instance(existing_child_id.to_string()).await {
+            match self
+                .instance_svc
+                .get_workflow_instance(existing_child_id.to_string())
+                .await
+            {
                 Ok(child) => {
                     use crate::shared::workflow::WorkflowInstanceStatus;
                     use crate::workflow::entity::workflow_definition::NodeExecutionStatus;
@@ -108,7 +119,8 @@ impl PluginInterface for SubWorkflowPlugin {
             ));
         }
 
-        let workflow_entity = self.definition_svc
+        let workflow_entity = self
+            .definition_svc
             .get_workflow_entity(template.workflow_meta_id.clone(), template.workflow_version)
             .await
             .map_err(|e| {
@@ -125,7 +137,10 @@ impl PluginInterface for SubWorkflowPlugin {
         if !template.form.is_empty() {
             if let serde_json::Value::Object(ref mut ctx) = child_context {
                 for field in &template.form {
-                    ctx.insert(field.key.clone(), serde_json::to_value(&field.value).unwrap_or_default());
+                    ctx.insert(
+                        field.key.clone(),
+                        serde_json::to_value(&field.value).unwrap_or_default(),
+                    );
                 }
             }
         }
@@ -139,8 +154,16 @@ impl PluginInterface for SubWorkflowPlugin {
             item_index: None,
         };
 
-        let child_instance = self.instance_svc
-            .create_instance(&workflow_instance.tenant_id, &workflow_entity, child_context, Some(parent_ctx), child_depth, workflow_instance.created_by.clone())
+        let child_instance = self
+            .instance_svc
+            .create_instance(
+                &workflow_instance.tenant_id,
+                &workflow_entity,
+                child_context,
+                Some(parent_ctx),
+                child_depth,
+                workflow_instance.created_by.clone(),
+            )
             .await
             .map_err(|e| {
                 error!(
@@ -185,15 +208,24 @@ impl PluginInterface for SubWorkflowPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::interface::PluginInterface;
     use crate::plugin::interface::PluginExecutor;
-    use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus, TaskType as TaskType_};
+    use crate::plugin::interface::PluginInterface;
     use crate::shared::job::WorkflowEvent;
-    use crate::task::entity::task_definition::{SubWorkflowTemplate, TaskInstanceEntity, TaskTemplate as TTemplate};
-    use crate::task::repository::TaskInstanceEntityRepository;
+    use crate::shared::workflow::{
+        TaskInstanceStatus, TaskType as TaskType_, WorkflowInstanceStatus,
+    };
+    use crate::task::entity::task_definition::{
+        SubWorkflowTemplate, TaskInstanceEntity, TaskTemplate as TTemplate,
+    };
     use crate::task::repository::RepositoryError as TaskRepoError;
-    use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity, WorkflowEntity, WorkflowNodeEntity};
-    use crate::workflow::repository::{RepositoryError as WfRepoError, WorkflowDefinitionRepository, WorkflowInstanceRepository};
+    use crate::task::repository::TaskInstanceEntityRepository;
+    use crate::workflow::entity::workflow_definition::{
+        NodeExecutionStatus, WorkflowEntity, WorkflowInstanceEntity, WorkflowNodeEntity,
+        WorkflowNodeInstanceEntity,
+    };
+    use crate::workflow::repository::{
+        RepositoryError as WfRepoError, WorkflowDefinitionRepository, WorkflowInstanceRepository,
+    };
     use chrono::Utc;
     use common::pagination::PaginatedData;
     use std::sync::Arc;
@@ -203,9 +235,32 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PluginExecutor for StubExecutor {
-        async fn execute_node_instance(&self, _: &mut WorkflowNodeInstanceEntity, _: &mut WorkflowInstanceEntity) -> anyhow::Result<ExecutionResult> { unreachable!() }
-        async fn handle_node_callback(&self, _: &mut WorkflowNodeInstanceEntity, _: &mut WorkflowInstanceEntity, _: &str, _: &NodeExecutionStatus, _: &Option<serde_json::Value>, _: &Option<String>, _: &Option<serde_json::Value>) -> anyhow::Result<ExecutionResult> { unreachable!() }
-        async fn resolve_child_status(&self, _: &str, _: &TTemplate) -> crate::plugin::interface::ChildStatus { unreachable!() }
+        async fn execute_node_instance(
+            &self,
+            _: &mut WorkflowNodeInstanceEntity,
+            _: &mut WorkflowInstanceEntity,
+        ) -> anyhow::Result<ExecutionResult> {
+            unreachable!()
+        }
+        async fn handle_node_callback(
+            &self,
+            _: &mut WorkflowNodeInstanceEntity,
+            _: &mut WorkflowInstanceEntity,
+            _: &str,
+            _: &NodeExecutionStatus,
+            _: &Option<serde_json::Value>,
+            _: &Option<String>,
+            _: &Option<serde_json::Value>,
+        ) -> anyhow::Result<ExecutionResult> {
+            unreachable!()
+        }
+        async fn resolve_child_status(
+            &self,
+            _: &str,
+            _: &TTemplate,
+        ) -> crate::plugin::interface::ChildStatus {
+            unreachable!()
+        }
     }
 
     struct MockDefRepo {
@@ -214,19 +269,78 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkflowDefinitionRepository for MockDefRepo {
-        async fn get_workflow_entity(&self, _workflow_meta_id: String, _version: u32) -> Result<WorkflowEntity, WfRepoError> {
-            self.workflow_entity.lock().unwrap().clone().ok_or_else(|| "not found".into())
+        async fn get_workflow_entity(
+            &self,
+            _workflow_meta_id: String,
+            _version: u32,
+        ) -> Result<WorkflowEntity, WfRepoError> {
+            self.workflow_entity
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "not found".into())
         }
-        async fn list_workflow_entities(&self, _: &str) -> Result<Vec<WorkflowEntity>, WfRepoError> { Ok(vec![]) }
-        async fn save_workflow_entity(&self, _: &WorkflowEntity) -> Result<(), WfRepoError> { Ok(()) }
-        async fn max_version(&self, _: String) -> Result<u32, WfRepoError> { Ok(1) }
-        async fn transition_status(&self, _: String, _: u32, _: &crate::shared::workflow::WorkflowStatus, _: &crate::shared::workflow::WorkflowStatus) -> Result<(), WfRepoError> { Ok(()) }
-        async fn get_workflow_meta_entity(&self, _: String) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError> { unreachable!() }
-        async fn get_workflow_meta_entity_scoped(&self, _: &str, _: &str) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError> { unreachable!() }
-        async fn list_workflow_meta_entities(&self, _: &str) -> Result<Vec<crate::workflow::entity::workflow_definition::WorkflowMetaEntity>, WfRepoError> { Ok(vec![]) }
-        async fn save_workflow_meta_entity(&self, _: &crate::workflow::entity::workflow_definition::WorkflowMetaEntity) -> Result<(), WfRepoError> { Ok(()) }
-        async fn delete_workflow_meta_entity(&self, _: &str, _: &str) -> Result<(), WfRepoError> { Ok(()) }
-        async fn create_workflow_meta_entity(&self, _: &crate::workflow::entity::workflow_definition::WorkflowMetaEntity) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError> { unreachable!() }
+        async fn list_workflow_entities(
+            &self,
+            _: &str,
+        ) -> Result<Vec<WorkflowEntity>, WfRepoError> {
+            Ok(vec![])
+        }
+        async fn save_workflow_entity(&self, _: &WorkflowEntity) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn max_version(&self, _: String) -> Result<u32, WfRepoError> {
+            Ok(1)
+        }
+        async fn transition_status(
+            &self,
+            _: String,
+            _: u32,
+            _: &crate::shared::workflow::WorkflowStatus,
+            _: &crate::shared::workflow::WorkflowStatus,
+        ) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn get_workflow_meta_entity(
+            &self,
+            _: String,
+        ) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError>
+        {
+            unreachable!()
+        }
+        async fn get_workflow_meta_entity_scoped(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError>
+        {
+            unreachable!()
+        }
+        async fn list_workflow_meta_entities(
+            &self,
+            _: &str,
+        ) -> Result<
+            Vec<crate::workflow::entity::workflow_definition::WorkflowMetaEntity>,
+            WfRepoError,
+        > {
+            Ok(vec![])
+        }
+        async fn save_workflow_meta_entity(
+            &self,
+            _: &crate::workflow::entity::workflow_definition::WorkflowMetaEntity,
+        ) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn delete_workflow_meta_entity(&self, _: &str, _: &str) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn create_workflow_meta_entity(
+            &self,
+            _: &crate::workflow::entity::workflow_definition::WorkflowMetaEntity,
+        ) -> Result<crate::workflow::entity::workflow_definition::WorkflowMetaEntity, WfRepoError>
+        {
+            unreachable!()
+        }
     }
 
     struct MockInstanceRepo {
@@ -236,37 +350,125 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkflowInstanceRepository for MockInstanceRepo {
-        async fn get_workflow_instance(&self, _id: String) -> Result<WorkflowInstanceEntity, WfRepoError> {
-            self.get_response.lock().unwrap().take().unwrap_or_else(|| Err("not found".into()))
+        async fn get_workflow_instance(
+            &self,
+            _id: String,
+        ) -> Result<WorkflowInstanceEntity, WfRepoError> {
+            self.get_response
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Err("not found".into()))
         }
-        async fn get_workflow_instance_scoped(&self, _: &str, _: &str) -> Result<WorkflowInstanceEntity, WfRepoError> {
+        async fn get_workflow_instance_scoped(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<WorkflowInstanceEntity, WfRepoError> {
             unreachable!()
         }
-        async fn list_workflow_instances(&self, _: &str, _: &crate::workflow::entity::query::WorkflowInstanceQuery) -> Result<PaginatedData<WorkflowInstanceEntity>, WfRepoError> { unreachable!() }
-        async fn transfer_status(&self, _: &str, _: &WorkflowInstanceStatus, _: &WorkflowInstanceStatus) -> Result<WorkflowInstanceEntity, WfRepoError> { unreachable!() }
-        async fn acquire_lock(&self, _: &str, _: &str, _: u64) -> Result<WorkflowInstanceEntity, WfRepoError> { unreachable!() }
-        async fn release_lock(&self, _: &str, _: &str) -> Result<(), WfRepoError> { Ok(()) }
-        async fn create_workflow_instance(&self, instance: &WorkflowInstanceEntity) -> Result<WorkflowInstanceEntity, WfRepoError> {
+        async fn list_workflow_instances(
+            &self,
+            _: &str,
+            _: &crate::workflow::entity::query::WorkflowInstanceQuery,
+        ) -> Result<PaginatedData<WorkflowInstanceEntity>, WfRepoError> {
+            unreachable!()
+        }
+        async fn transfer_status(
+            &self,
+            _: &str,
+            _: &WorkflowInstanceStatus,
+            _: &WorkflowInstanceStatus,
+        ) -> Result<WorkflowInstanceEntity, WfRepoError> {
+            unreachable!()
+        }
+        async fn acquire_lock(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<WorkflowInstanceEntity, WfRepoError> {
+            unreachable!()
+        }
+        async fn release_lock(&self, _: &str, _: &str) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn create_workflow_instance(
+            &self,
+            instance: &WorkflowInstanceEntity,
+        ) -> Result<WorkflowInstanceEntity, WfRepoError> {
             let mut created = self.created.lock().unwrap();
             *created = Some(instance.clone());
             Ok(instance.clone())
         }
-        async fn save_workflow_instance(&self, _: &WorkflowInstanceEntity) -> Result<(), WfRepoError> { Ok(()) }
-        async fn scan_zombie_instances(&self, _: u32) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> { Ok(vec![]) }
-        async fn force_clear_lock(&self, _: &str, _: u64) -> Result<(), WfRepoError> { Ok(()) }
-        async fn scan_instances_by_status(&self, _: &WorkflowInstanceStatus, _: u32) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> { Ok(vec![]) }
+        async fn save_workflow_instance(
+            &self,
+            _: &WorkflowInstanceEntity,
+        ) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn scan_zombie_instances(
+            &self,
+            _: u32,
+        ) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> {
+            Ok(vec![])
+        }
+        async fn force_clear_lock(&self, _: &str, _: u64) -> Result<(), WfRepoError> {
+            Ok(())
+        }
+        async fn scan_instances_by_status(
+            &self,
+            _: &WorkflowInstanceStatus,
+            _: u32,
+        ) -> Result<Vec<WorkflowInstanceEntity>, WfRepoError> {
+            Ok(vec![])
+        }
     }
 
     struct MockTaskInstanceRepo;
 
     #[async_trait::async_trait]
     impl TaskInstanceEntityRepository for MockTaskInstanceRepo {
-        async fn create_task_instance_entity(&self, _: TaskInstanceEntity) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
-        async fn get_task_instance_entity(&self, _: String) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
-        async fn get_task_instance_entity_scoped(&self, _: &str, _: &str) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
-        async fn list_task_instance_entities(&self, _: &crate::task::entity::query::TaskInstanceQuery) -> Result<PaginatedData<TaskInstanceEntity>, TaskRepoError> { unreachable!() }
-        async fn update_task_instance_entity(&self, _: TaskInstanceEntity) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
-        async fn transfer_status_with_fields(&self, _: &str, _: &TaskInstanceStatus, _: &TaskInstanceStatus, _: crate::task::entity::task_definition::TaskTransitionFields) -> Result<TaskInstanceEntity, TaskRepoError> { unreachable!() }
+        async fn create_task_instance_entity(
+            &self,
+            _: TaskInstanceEntity,
+        ) -> Result<TaskInstanceEntity, TaskRepoError> {
+            unreachable!()
+        }
+        async fn get_task_instance_entity(
+            &self,
+            _: String,
+        ) -> Result<TaskInstanceEntity, TaskRepoError> {
+            unreachable!()
+        }
+        async fn get_task_instance_entity_scoped(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<TaskInstanceEntity, TaskRepoError> {
+            unreachable!()
+        }
+        async fn list_task_instance_entities(
+            &self,
+            _: &crate::task::entity::query::TaskInstanceQuery,
+        ) -> Result<PaginatedData<TaskInstanceEntity>, TaskRepoError> {
+            unreachable!()
+        }
+        async fn update_task_instance_entity(
+            &self,
+            _: TaskInstanceEntity,
+        ) -> Result<TaskInstanceEntity, TaskRepoError> {
+            unreachable!()
+        }
+        async fn transfer_status_with_fields(
+            &self,
+            _: &str,
+            _: &TaskInstanceStatus,
+            _: &TaskInstanceStatus,
+            _: crate::task::entity::task_definition::TaskTransitionFields,
+        ) -> Result<TaskInstanceEntity, TaskRepoError> {
+            unreachable!()
+        }
     }
 
     fn make_workflow_entity() -> WorkflowEntity {
@@ -279,19 +481,31 @@ mod tests {
                 node_type: TaskType_::Http,
                 task_id: None,
                 config: TTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
-                    url: "/child".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
-                    headers: vec![], body: vec![], form: vec![],
-                    retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
+                    url: "/child".into(),
+                    method: crate::task::entity::task_definition::HttpMethod::Get,
+                    headers: vec![],
+                    body: vec![],
+                    form: vec![],
+                    retry_count: 0,
+                    retry_delay: 0,
+                    timeout: 30,
+                    success_condition: None,
                 }),
                 context: serde_json::json!({}),
                 next_node: None,
             }],
             entry_node: "child-start".into(),
-            created_at: Utc::now(), updated_at: Utc::now(), deleted_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
         }
     }
 
-    fn make_node(_plugin: &SubWorkflowPlugin, wf: &WorkflowInstanceEntity, node_id: &str) -> WorkflowNodeInstanceEntity {
+    fn make_node(
+        _plugin: &SubWorkflowPlugin,
+        wf: &WorkflowInstanceEntity,
+        node_id: &str,
+    ) -> WorkflowNodeInstanceEntity {
         let now = Utc::now();
         WorkflowNodeInstanceEntity {
             node_id: node_id.to_string(),
@@ -299,7 +513,8 @@ mod tests {
             task_instance: TaskInstanceEntity {
                 id: format!("ti-{}", node_id),
                 tenant_id: wf.tenant_id.clone(),
-                task_id: "".into(), task_name: "subwf".to_string(),
+                task_id: "".into(),
+                task_name: "subwf".to_string(),
                 task_type: TaskType::SubWorkflow,
                 task_template: TTemplate::SubWorkflow(SubWorkflowTemplate {
                     workflow_meta_id: "child-meta".into(),
@@ -309,34 +524,54 @@ mod tests {
                 }),
                 task_status: TaskInstanceStatus::Pending,
                 task_instance_id: format!("{}-{}", wf.workflow_instance_id, node_id),
-                created_at: now, updated_at: now, deleted_at: None,
-                input: None, output: None, error_message: None, execution_duration: None,
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+                input: None,
+                output: None,
+                error_message: None,
+                execution_duration: None,
                 caller_context: None,
             },
-            context: serde_json::json!({}), next_node: None,
+            context: serde_json::json!({}),
+            next_node: None,
             status: NodeExecutionStatus::Pending,
-            error_message: None, created_at: now, updated_at: now,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
     fn make_instance(depth: u32) -> WorkflowInstanceEntity {
         let now = Utc::now();
         WorkflowInstanceEntity {
-            workflow_instance_id: "wf-parent".into(), tenant_id: "t1".into(),
-            workflow_meta_id: "parent-meta".into(), workflow_version: 1,
+            workflow_instance_id: "wf-parent".into(),
+            tenant_id: "t1".into(),
+            workflow_meta_id: "parent-meta".into(),
+            workflow_version: 1,
             status: WorkflowInstanceStatus::Running,
-            created_at: now, updated_at: now, deleted_at: None,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
             context: serde_json::json!({}),
-            entry_node: "s1".into(), current_node: "s1".into(),
-            nodes: vec![], epoch: 0,
-            locked_by: None, locked_duration: None, locked_at: None,
-            parent_context: None, depth, created_by: Some("user1".into()),
+            entry_node: "s1".into(),
+            current_node: "s1".into(),
+            nodes: vec![],
+            epoch: 0,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth,
+            created_by: Some("user1".into()),
         }
     }
 
     #[tokio::test]
     async fn execute_creates_child_workflow() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let inst_repo = Arc::new(MockInstanceRepo {
             created: Mutex::new(None),
             get_response: Mutex::new(None),
@@ -344,12 +579,16 @@ mod tests {
         let ti_repo = Arc::new(MockTaskInstanceRepo);
         let ti_svc = Arc::new(crate::task::service::TaskInstanceService::new(ti_repo));
         let def_svc = crate::workflow::service::WorkflowDefinitionService::new(def_repo);
-        let inst_svc = crate::workflow::service::WorkflowInstanceService::new(inst_repo.clone(), ti_svc);
+        let inst_svc =
+            crate::workflow::service::WorkflowInstanceService::new(inst_repo.clone(), ti_svc);
         let plugin = SubWorkflowPlugin::new(def_svc, inst_svc);
         let mut wf = make_instance(0);
         let mut node = make_node(&plugin, &wf, "s1");
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
         assert_eq!(result.dispatch_workflow_jobs.len(), 1);
@@ -364,12 +603,17 @@ mod tests {
         assert!(created.parent_context.is_some());
 
         let output = node.task_instance.output.as_ref().unwrap();
-        assert_eq!(output["child_workflow_instance_id"], created.workflow_instance_id);
+        assert_eq!(
+            output["child_workflow_instance_id"],
+            created.workflow_instance_id
+        );
     }
 
     #[tokio::test]
     async fn execute_depth_exceeded_returns_error() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let inst_repo = Arc::new(MockInstanceRepo {
             created: Mutex::new(None),
             get_response: Mutex::new(None),
@@ -389,7 +633,9 @@ mod tests {
 
     #[tokio::test]
     async fn reevaluation_child_completed_returns_success() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let child = WorkflowInstanceEntity {
             workflow_instance_id: "child-wf".into(),
             status: WorkflowInstanceStatus::Completed,
@@ -406,16 +652,22 @@ mod tests {
         let plugin = SubWorkflowPlugin::new(def_svc, inst_svc);
         let mut wf = make_instance(0);
         let mut node = make_node(&plugin, &wf, "s2");
-        node.task_instance.output = Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
+        node.task_instance.output =
+            Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
     }
 
     #[tokio::test]
     async fn reevaluation_child_failed_returns_failed() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let child = WorkflowInstanceEntity {
             workflow_instance_id: "child-wf".into(),
             status: WorkflowInstanceStatus::Failed,
@@ -432,16 +684,22 @@ mod tests {
         let plugin = SubWorkflowPlugin::new(def_svc, inst_svc);
         let mut wf = make_instance(0);
         let mut node = make_node(&plugin, &wf, "s3");
-        node.task_instance.output = Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
+        node.task_instance.output =
+            Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Failed);
     }
 
     #[tokio::test]
     async fn reevaluation_child_running_returns_await() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let child = WorkflowInstanceEntity {
             workflow_instance_id: "child-wf".into(),
             status: WorkflowInstanceStatus::Running,
@@ -458,16 +716,22 @@ mod tests {
         let plugin = SubWorkflowPlugin::new(def_svc, inst_svc);
         let mut wf = make_instance(0);
         let mut node = make_node(&plugin, &wf, "s4");
-        node.task_instance.output = Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
+        node.task_instance.output =
+            Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
     }
 
     #[tokio::test]
     async fn reevaluation_child_not_found_creates_new() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(Some(make_workflow_entity())) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(Some(make_workflow_entity())),
+        });
         let inst_repo = Arc::new(MockInstanceRepo {
             created: Mutex::new(None),
             get_response: Mutex::new(Some(Err("not found".into()))),
@@ -475,13 +739,18 @@ mod tests {
         let ti_repo = Arc::new(MockTaskInstanceRepo);
         let ti_svc = Arc::new(crate::task::service::TaskInstanceService::new(ti_repo));
         let def_svc = crate::workflow::service::WorkflowDefinitionService::new(def_repo);
-        let inst_svc = crate::workflow::service::WorkflowInstanceService::new(inst_repo.clone(), ti_svc);
+        let inst_svc =
+            crate::workflow::service::WorkflowInstanceService::new(inst_repo.clone(), ti_svc);
         let plugin = SubWorkflowPlugin::new(def_svc, inst_svc);
         let mut wf = make_instance(0);
         let mut node = make_node(&plugin, &wf, "s5");
-        node.task_instance.output = Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
+        node.task_instance.output =
+            Some(serde_json::json!({"child_workflow_instance_id": "child-wf"}));
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
         let created = inst_repo.created.lock().unwrap().take().unwrap();
@@ -490,7 +759,9 @@ mod tests {
 
     #[test]
     fn plugin_type_is_subworkflow() {
-        let def_repo = Arc::new(MockDefRepo { workflow_entity: Mutex::new(None) });
+        let def_repo = Arc::new(MockDefRepo {
+            workflow_entity: Mutex::new(None),
+        });
         let inst_repo = Arc::new(MockInstanceRepo {
             created: Mutex::new(None),
             get_response: Mutex::new(None),
@@ -499,6 +770,9 @@ mod tests {
         let ti_svc = Arc::new(crate::task::service::TaskInstanceService::new(ti_repo));
         let def_svc = crate::workflow::service::WorkflowDefinitionService::new(def_repo);
         let inst_svc = crate::workflow::service::WorkflowInstanceService::new(inst_repo, ti_svc);
-        assert_eq!(SubWorkflowPlugin::new(def_svc, inst_svc).plugin_type(), TaskType::SubWorkflow);
+        assert_eq!(
+            SubWorkflowPlugin::new(def_svc, inst_svc).plugin_type(),
+            TaskType::SubWorkflow
+        );
     }
 }

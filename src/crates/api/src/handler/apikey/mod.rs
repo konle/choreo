@@ -1,14 +1,14 @@
 use axum::{
+    Json, Router,
     extract::{Extension, Path, State},
     routing::{delete, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::error;
 
 use crate::error::ApiError;
-use crate::middleware::auth::{create_token, AuthContext, Claims};
+use crate::middleware::auth::{AuthContext, Claims, create_token};
 use crate::response::response::Response;
 use domain::apikey::service::ApiKeyService;
 use domain::user::entity::TenantRole;
@@ -125,7 +125,9 @@ async fn create_api_key(
         .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {}", req.role)))?;
 
     if matches!(role, TenantRole::TenantAdmin) {
-        return Err(ApiError::bad_request("API keys cannot have TenantAdmin role"));
+        return Err(ApiError::bad_request(
+            "API keys cannot have TenantAdmin role",
+        ));
     }
 
     let token_ttl_secs = req.token_ttl_secs.unwrap_or(3600);
@@ -138,7 +140,9 @@ async fn create_api_key(
     let expires_at = match &req.expires_at {
         Some(s) => Some(
             chrono::DateTime::parse_from_rfc3339(s)
-                .map_err(|_| ApiError::bad_request("Invalid expires_at: expected ISO 8601 / RFC3339"))?
+                .map_err(|_| {
+                    ApiError::bad_request("Invalid expires_at: expected ISO 8601 / RFC3339")
+                })?
                 .with_timezone(&chrono::Utc),
         ),
         None => None,

@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use chrono::Utc;
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::variable::entity::{VariableEntity, VariableScope, VariableType};
@@ -22,18 +22,29 @@ impl VariableService {
         }
     }
 
-    pub async fn create(&self, mut entity: VariableEntity) -> Result<VariableEntity, RepositoryError> {
+    pub async fn create(
+        &self,
+        mut entity: VariableEntity,
+    ) -> Result<VariableEntity, RepositoryError> {
         entity.id = Uuid::new_v4().to_string();
         entity.created_at = Utc::now();
         entity.updated_at = Utc::now();
 
-        if let Some(existing) = self.repository.get_by_key(
-            &entity.tenant_id, &entity.scope, &entity.scope_id, &entity.key,
-        ).await? {
+        if let Some(existing) = self
+            .repository
+            .get_by_key(
+                &entity.tenant_id,
+                &entity.scope,
+                &entity.scope_id,
+                &entity.key,
+            )
+            .await?
+        {
             return Err(format!(
                 "variable key '{}' already exists in scope {:?}/{} (id={})",
                 entity.key, entity.scope, entity.scope_id, existing.id
-            ).into());
+            )
+            .into());
         }
 
         if entity.variable_type.is_secret() {
@@ -43,7 +54,11 @@ impl VariableService {
         self.repository.create(&entity).await
     }
 
-    pub async fn get_by_id(&self, tenant_id: &str, id: &str) -> Result<VariableEntity, RepositoryError> {
+    pub async fn get_by_id(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<VariableEntity, RepositoryError> {
         let mut entity = self.repository.get_by_id(tenant_id, id).await?;
         if entity.variable_type.is_secret() {
             entity.value = SECRET_MASK.to_string();
@@ -51,7 +66,10 @@ impl VariableService {
         Ok(entity)
     }
 
-    pub async fn update(&self, mut entity: VariableEntity) -> Result<VariableEntity, RepositoryError> {
+    pub async fn update(
+        &self,
+        mut entity: VariableEntity,
+    ) -> Result<VariableEntity, RepositoryError> {
         entity.updated_at = Utc::now();
         if entity.variable_type.is_secret() {
             entity.value = self.encrypt(&entity.value)?;
@@ -69,7 +87,10 @@ impl VariableService {
         scope: &VariableScope,
         scope_id: &str,
     ) -> Result<Vec<VariableEntity>, RepositoryError> {
-        let mut entities = self.repository.list_by_scope(tenant_id, scope, scope_id).await?;
+        let mut entities = self
+            .repository
+            .list_by_scope(tenant_id, scope, scope_id)
+            .await?;
         for e in &mut entities {
             if e.variable_type.is_secret() {
                 e.value = SECRET_MASK.to_string();
@@ -89,17 +110,19 @@ impl VariableService {
     ) -> Result<JsonValue, RepositoryError> {
         let mut merged = serde_json::Map::new();
 
-        let tenant_vars = self.repository.list_by_scope(
-            tenant_id, &VariableScope::Tenant, tenant_id,
-        ).await?;
+        let tenant_vars = self
+            .repository
+            .list_by_scope(tenant_id, &VariableScope::Tenant, tenant_id)
+            .await?;
         for var in tenant_vars {
             let val = self.to_json_value(&var)?;
             merged.insert(var.key, val);
         }
 
-        let meta_vars = self.repository.list_by_scope(
-            tenant_id, &VariableScope::WorkflowMeta, workflow_meta_id,
-        ).await?;
+        let meta_vars = self
+            .repository
+            .list_by_scope(tenant_id, &VariableScope::WorkflowMeta, workflow_meta_id)
+            .await?;
         for var in meta_vars {
             let val = self.to_json_value(&var)?;
             merged.insert(var.key, val);
@@ -129,9 +152,10 @@ impl VariableService {
     ) -> Result<JsonValue, RepositoryError> {
         let mut merged = serde_json::Map::new();
 
-        let tenant_vars = self.repository.list_by_scope(
-            tenant_id, &VariableScope::Tenant, tenant_id,
-        ).await?;
+        let tenant_vars = self
+            .repository
+            .list_by_scope(tenant_id, &VariableScope::Tenant, tenant_id)
+            .await?;
         for var in tenant_vars {
             let val = self.to_json_value(&var)?;
             merged.insert(var.key, val);
@@ -156,11 +180,15 @@ impl VariableService {
         match var.variable_type {
             VariableType::String | VariableType::Secret => Ok(JsonValue::String(raw)),
             VariableType::Number => {
-                let n: f64 = raw.parse().map_err(|_| format!("variable '{}' is not a valid number", var.key))?;
+                let n: f64 = raw
+                    .parse()
+                    .map_err(|_| format!("variable '{}' is not a valid number", var.key))?;
                 Ok(serde_json::json!(n))
             }
             VariableType::Bool => {
-                let b: bool = raw.parse().map_err(|_| format!("variable '{}' is not a valid bool", var.key))?;
+                let b: bool = raw
+                    .parse()
+                    .map_err(|_| format!("variable '{}' is not a valid bool", var.key))?;
                 Ok(JsonValue::Bool(b))
             }
             VariableType::Json => {
@@ -172,9 +200,9 @@ impl VariableService {
     }
 
     fn encrypt(&self, plaintext: &str) -> Result<String, RepositoryError> {
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
-        use aes_gcm::aead::{Aead, KeyInit, OsRng};
         use aes_gcm::aead::rand_core::RngCore;
+        use aes_gcm::aead::{Aead, KeyInit, OsRng};
+        use aes_gcm::{Aes256Gcm, Key, Nonce};
         use base64::Engine;
         use base64::engine::general_purpose::STANDARD;
 
@@ -186,7 +214,8 @@ impl VariableService {
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_bytes())
             .map_err(|e| format!("encryption failed: {}", e))?;
 
         let mut combined = Vec::with_capacity(12 + ciphertext.len());
@@ -197,12 +226,13 @@ impl VariableService {
     }
 
     fn decrypt(&self, encoded: &str) -> Result<String, RepositoryError> {
-        use aes_gcm::{Aes256Gcm, Key, Nonce};
         use aes_gcm::aead::{Aead, KeyInit};
+        use aes_gcm::{Aes256Gcm, Key, Nonce};
         use base64::Engine;
         use base64::engine::general_purpose::STANDARD;
 
-        let combined = STANDARD.decode(encoded)
+        let combined = STANDARD
+            .decode(encoded)
             .map_err(|e| format!("base64 decode failed: {}", e))?;
 
         if combined.len() < 12 {
@@ -215,7 +245,8 @@ impl VariableService {
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext = cipher.decrypt(nonce, ciphertext)
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
             .map_err(|e| format!("decryption failed: {}", e))?;
 
         String::from_utf8(plaintext)

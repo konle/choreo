@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use mongodb::{Client, Collection, Database};
-use mongodb::bson::doc;
 use domain::tenant::entity::TenantEntity;
-use domain::tenant::repository::{TenantRepository, RepositoryError};
+use domain::tenant::repository::{RepositoryError, TenantRepository};
+use mongodb::bson::doc;
+use mongodb::{Client, Collection, Database};
 
 pub struct TenantRepositoryImpl {
     collection: Collection<TenantEntity>,
@@ -44,7 +44,9 @@ impl TenantRepository for TenantRepositoryImpl {
     }
 
     async fn delete(&self, tenant_id: &str) -> Result<(), RepositoryError> {
-        self.collection.delete_one(doc! { "tenant_id": tenant_id }).await?;
+        self.collection
+            .delete_one(doc! { "tenant_id": tenant_id })
+            .await?;
         Ok(())
     }
 }

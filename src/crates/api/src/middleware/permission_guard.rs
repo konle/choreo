@@ -90,7 +90,9 @@ impl PermissionLevel for RequireTenantVariableWrite {
         }
         match &auth.role {
             Some(TenantRole::TenantAdmin) => Ok(()),
-            _ => Err(ApiError::forbidden("only TenantAdmin can write tenant variables")),
+            _ => Err(ApiError::forbidden(
+                "only TenantAdmin can write tenant variables",
+            )),
         }
     }
 }

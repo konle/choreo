@@ -1,19 +1,25 @@
-use std::sync::Arc;
-use chrono::Utc;
-use serde_json::Value as JsonValue;
-use tracing::{info, warn};
-use uuid::Uuid;
-use crate::shared::job::{WorkflowCallerContext, ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher};
-use crate::shared::workflow::{TaskInstanceStatus, TaskType, WorkflowInstanceStatus, WorkflowStatus};
+use crate::shared::job::{
+    ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext,
+};
+use crate::shared::workflow::{
+    TaskInstanceStatus, TaskType, WorkflowInstanceStatus, WorkflowStatus,
+};
 use crate::task::entity::task_definition::TaskInstanceEntity;
 use crate::task::service::TaskInstanceService;
 use crate::workflow::entity::query::WorkflowInstanceQuery;
 use crate::workflow::entity::workflow_definition::{
-    NodeExecutionStatus, WorkflowEntity, WorkflowInstanceEntity,
-    WorkflowMetaEntity, WorkflowNodeInstanceEntity,
+    NodeExecutionStatus, WorkflowEntity, WorkflowInstanceEntity, WorkflowMetaEntity,
+    WorkflowNodeInstanceEntity,
 };
+use crate::workflow::repository::{
+    RepositoryError, WorkflowDefinitionRepository, WorkflowInstanceRepository,
+};
+use chrono::Utc;
 use common::pagination::PaginatedData;
-use crate::workflow::repository::{RepositoryError, WorkflowDefinitionRepository, WorkflowInstanceRepository};
+use serde_json::Value as JsonValue;
+use std::sync::Arc;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 /// A no-op dispatcher that discards all dispatch calls.
 /// Used as a default when no real dispatcher is configured (e.g. in apiserver which doesn't need dispatch).
@@ -39,43 +45,91 @@ impl WorkflowDefinitionService {
         Self { repository }
     }
 
-    pub async fn create_workflow_meta_entity(&self, workflow_meta_entity: &WorkflowMetaEntity) -> Result<WorkflowMetaEntity, RepositoryError> {
-        self.repository.create_workflow_meta_entity(workflow_meta_entity).await
+    pub async fn create_workflow_meta_entity(
+        &self,
+        workflow_meta_entity: &WorkflowMetaEntity,
+    ) -> Result<WorkflowMetaEntity, RepositoryError> {
+        self.repository
+            .create_workflow_meta_entity(workflow_meta_entity)
+            .await
     }
 
-    pub async fn get_workflow_entity(&self, workflow_meta_id: String, version: u32) -> Result<WorkflowEntity, RepositoryError> {
-        self.repository.get_workflow_entity(workflow_meta_id, version).await
+    pub async fn get_workflow_entity(
+        &self,
+        workflow_meta_id: String,
+        version: u32,
+    ) -> Result<WorkflowEntity, RepositoryError> {
+        self.repository
+            .get_workflow_entity(workflow_meta_id, version)
+            .await
     }
 
-    pub async fn list_workflow_entities(&self, workflow_meta_id: &str) -> Result<Vec<WorkflowEntity>, RepositoryError> {
-        self.repository.list_workflow_entities(workflow_meta_id).await
+    pub async fn list_workflow_entities(
+        &self,
+        workflow_meta_id: &str,
+    ) -> Result<Vec<WorkflowEntity>, RepositoryError> {
+        self.repository
+            .list_workflow_entities(workflow_meta_id)
+            .await
     }
 
-    pub async fn save_workflow_entity(&self, entity: &WorkflowEntity) -> Result<(), RepositoryError> {
+    pub async fn save_workflow_entity(
+        &self,
+        entity: &WorkflowEntity,
+    ) -> Result<(), RepositoryError> {
         self.repository.save_workflow_entity(entity).await
     }
 
-    pub async fn publish_workflow_entity(&self, workflow_meta_id: &str, version: u32) -> Result<(), RepositoryError> {
-        self.transition_status(workflow_meta_id.to_string(), version, &WorkflowStatus::Draft, &WorkflowStatus::Published).await
+    pub async fn publish_workflow_entity(
+        &self,
+        workflow_meta_id: &str,
+        version: u32,
+    ) -> Result<(), RepositoryError> {
+        self.transition_status(
+            workflow_meta_id.to_string(),
+            version,
+            &WorkflowStatus::Draft,
+            &WorkflowStatus::Published,
+        )
+        .await
     }
 
-    async fn transition_status(&self, workflow_meta_id: String, version: u32, from_status: &WorkflowStatus, to_status: &WorkflowStatus) -> Result<(), RepositoryError> {
+    async fn transition_status(
+        &self,
+        workflow_meta_id: String,
+        version: u32,
+        from_status: &WorkflowStatus,
+        to_status: &WorkflowStatus,
+    ) -> Result<(), RepositoryError> {
         if !from_status.can_transition_to(to_status) {
             return Err(format!(
                 "invalid workflow status transition: {} -> {}",
                 from_status, to_status
-            ).into());
+            )
+            .into());
         }
-        self.repository.transition_status(workflow_meta_id, version, from_status, to_status).await
+        self.repository
+            .transition_status(workflow_meta_id, version, from_status, to_status)
+            .await
     }
 
-    pub async fn copy_workflow_entity(&self, workflow_meta_id: &str, version: u32) -> Result<(), RepositoryError> {
-        let max_version = self.repository.max_version(workflow_meta_id.to_string()).await?;
-        let workflow_entity = self.get_workflow_entity(workflow_meta_id.to_string(), version).await?;
+    pub async fn copy_workflow_entity(
+        &self,
+        workflow_meta_id: &str,
+        version: u32,
+    ) -> Result<(), RepositoryError> {
+        let max_version = self
+            .repository
+            .max_version(workflow_meta_id.to_string())
+            .await?;
+        let workflow_entity = self
+            .get_workflow_entity(workflow_meta_id.to_string(), version)
+            .await?;
         if workflow_entity.status != WorkflowStatus::Published {
             return Err(format!(
                 "cannot copy workflow template: workflow template is not published",
-            ).into());
+            )
+            .into());
         }
         info!("max_version: {}", max_version);
         let new_workflow_entity = WorkflowEntity {
@@ -88,35 +142,80 @@ impl WorkflowDefinitionService {
             updated_at: Utc::now(),
             deleted_at: None,
         };
-        self.repository.save_workflow_entity(&new_workflow_entity).await
+        self.repository
+            .save_workflow_entity(&new_workflow_entity)
+            .await
     }
 
-    pub async fn delete_workflow_entity(&self, workflow_meta_id: String, version: u32) -> Result<(), RepositoryError> {
-        self.transition_status(workflow_meta_id.to_string(), version, &WorkflowStatus::Archived, &WorkflowStatus::Deleted).await
+    pub async fn delete_workflow_entity(
+        &self,
+        workflow_meta_id: String,
+        version: u32,
+    ) -> Result<(), RepositoryError> {
+        self.transition_status(
+            workflow_meta_id.to_string(),
+            version,
+            &WorkflowStatus::Archived,
+            &WorkflowStatus::Deleted,
+        )
+        .await
     }
 
-    pub async fn archive_workflow_entity(&self, workflow_meta_id: &str, version: u32) -> Result<(), RepositoryError> {
-        self.transition_status(workflow_meta_id.to_string(), version, &WorkflowStatus::Published, &WorkflowStatus::Archived).await
+    pub async fn archive_workflow_entity(
+        &self,
+        workflow_meta_id: &str,
+        version: u32,
+    ) -> Result<(), RepositoryError> {
+        self.transition_status(
+            workflow_meta_id.to_string(),
+            version,
+            &WorkflowStatus::Published,
+            &WorkflowStatus::Archived,
+        )
+        .await
     }
 
-    pub async fn get_workflow_meta_entity(&self, workflow_meta_id: String) -> Result<WorkflowMetaEntity, RepositoryError> {
-        self.repository.get_workflow_meta_entity(workflow_meta_id).await
+    pub async fn get_workflow_meta_entity(
+        &self,
+        workflow_meta_id: String,
+    ) -> Result<WorkflowMetaEntity, RepositoryError> {
+        self.repository
+            .get_workflow_meta_entity(workflow_meta_id)
+            .await
     }
 
-    pub async fn get_workflow_meta_entity_scoped(&self, tenant_id: &str, workflow_meta_id: &str) -> Result<WorkflowMetaEntity, RepositoryError> {
-        self.repository.get_workflow_meta_entity_scoped(tenant_id, workflow_meta_id).await
+    pub async fn get_workflow_meta_entity_scoped(
+        &self,
+        tenant_id: &str,
+        workflow_meta_id: &str,
+    ) -> Result<WorkflowMetaEntity, RepositoryError> {
+        self.repository
+            .get_workflow_meta_entity_scoped(tenant_id, workflow_meta_id)
+            .await
     }
 
-    pub async fn list_workflow_meta_entities(&self, tenant_id: &str) -> Result<Vec<WorkflowMetaEntity>, RepositoryError> {
+    pub async fn list_workflow_meta_entities(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<WorkflowMetaEntity>, RepositoryError> {
         self.repository.list_workflow_meta_entities(tenant_id).await
     }
 
-    pub async fn save_workflow_meta_entity(&self, entity: &WorkflowMetaEntity) -> Result<(), RepositoryError> {
+    pub async fn save_workflow_meta_entity(
+        &self,
+        entity: &WorkflowMetaEntity,
+    ) -> Result<(), RepositoryError> {
         self.repository.save_workflow_meta_entity(entity).await
     }
 
-    pub async fn delete_workflow_meta_entity(&self, tenant_id: &str, workflow_meta_id: &str) -> Result<(), RepositoryError> {
-        self.repository.delete_workflow_meta_entity(tenant_id, workflow_meta_id).await
+    pub async fn delete_workflow_meta_entity(
+        &self,
+        tenant_id: &str,
+        workflow_meta_id: &str,
+    ) -> Result<(), RepositoryError> {
+        self.repository
+            .delete_workflow_meta_entity(tenant_id, workflow_meta_id)
+            .await
     }
 }
 
@@ -139,17 +238,29 @@ impl WorkflowInstanceService {
         }
     }
 
-    pub fn with_dispatcher(mut self, dispatcher: Arc<dyn crate::shared::job::TaskDispatcher>) -> Self {
+    pub fn with_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn crate::shared::job::TaskDispatcher>,
+    ) -> Self {
         self.dispatcher = dispatcher;
         self
     }
 
-    pub async fn get_workflow_instance(&self, id: String) -> Result<WorkflowInstanceEntity, RepositoryError> {
+    pub async fn get_workflow_instance(
+        &self,
+        id: String,
+    ) -> Result<WorkflowInstanceEntity, RepositoryError> {
         self.repository.get_workflow_instance(id).await
     }
 
-    pub async fn get_workflow_instance_scoped(&self, tenant_id: &str, id: &str) -> Result<WorkflowInstanceEntity, RepositoryError> {
-        self.repository.get_workflow_instance_scoped(tenant_id, id).await
+    pub async fn get_workflow_instance_scoped(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<WorkflowInstanceEntity, RepositoryError> {
+        self.repository
+            .get_workflow_instance_scoped(tenant_id, id)
+            .await
     }
 
     pub async fn list_workflow_instances(
@@ -157,7 +268,9 @@ impl WorkflowInstanceService {
         tenant_id: &str,
         query: &WorkflowInstanceQuery,
     ) -> Result<PaginatedData<WorkflowInstanceEntity>, RepositoryError> {
-        self.repository.list_workflow_instances(tenant_id, query).await
+        self.repository
+            .list_workflow_instances(tenant_id, query)
+            .await
     }
 
     /// Expand a workflow template into a runnable instance (Pending, epoch=0).
@@ -175,37 +288,41 @@ impl WorkflowInstanceService {
 
         let entry_node = workflow_entity.entry_node.clone();
 
-        let nodes: Vec<WorkflowNodeInstanceEntity> = workflow_entity.nodes.iter().map(|node| {
-            let task_instance_id = Uuid::new_v4().to_string();
-            WorkflowNodeInstanceEntity {
-                node_id: node.node_id.clone(),
-                node_type: node.node_type.clone(),
-                task_instance: TaskInstanceEntity {
-                    id: task_instance_id.clone(),
-                    tenant_id: tenant_id.to_string(),
-                    task_id: node.task_id.clone().unwrap_or_default(),
-                    task_name: String::from(""),
-                    task_type: node.node_type.clone(),
-                    task_template: node.config.clone(),
-                    task_status: TaskInstanceStatus::Pending,
-                    task_instance_id,
+        let nodes: Vec<WorkflowNodeInstanceEntity> = workflow_entity
+            .nodes
+            .iter()
+            .map(|node| {
+                let task_instance_id = Uuid::new_v4().to_string();
+                WorkflowNodeInstanceEntity {
+                    node_id: node.node_id.clone(),
+                    node_type: node.node_type.clone(),
+                    task_instance: TaskInstanceEntity {
+                        id: task_instance_id.clone(),
+                        tenant_id: tenant_id.to_string(),
+                        task_id: node.task_id.clone().unwrap_or_default(),
+                        task_name: String::from(""),
+                        task_type: node.node_type.clone(),
+                        task_template: node.config.clone(),
+                        task_status: TaskInstanceStatus::Pending,
+                        task_instance_id,
+                        created_at: now,
+                        updated_at: now,
+                        deleted_at: None,
+                        input: None,
+                        output: None,
+                        error_message: None,
+                        execution_duration: None,
+                        caller_context: None,
+                    },
+                    context: node.context.clone(),
+                    next_node: node.next_node.clone(),
+                    status: NodeExecutionStatus::Pending,
+                    error_message: None,
                     created_at: now,
                     updated_at: now,
-                    deleted_at: None,
-                    input: None,
-                    output: None,
-                    error_message: None,
-                    execution_duration: None,
-                    caller_context: None,
-                },
-                context: node.context.clone(),
-                next_node: node.next_node.clone(),
-                status: NodeExecutionStatus::Pending,
-                error_message: None,
-                created_at: now,
-                updated_at: now,
-            }
-        }).collect();
+                }
+            })
+            .collect();
 
         let instance = WorkflowInstanceEntity {
             workflow_instance_id: instance_id,
@@ -232,15 +349,31 @@ impl WorkflowInstanceService {
         self.repository.create_workflow_instance(&instance).await
     }
 
-    pub async fn acquire_lock(&self, workflow_instance_id: &str, worker_id: &str, duration_ms: u64) -> Result<WorkflowInstanceEntity, RepositoryError> {
-        self.repository.acquire_lock(workflow_instance_id, worker_id, duration_ms).await
+    pub async fn acquire_lock(
+        &self,
+        workflow_instance_id: &str,
+        worker_id: &str,
+        duration_ms: u64,
+    ) -> Result<WorkflowInstanceEntity, RepositoryError> {
+        self.repository
+            .acquire_lock(workflow_instance_id, worker_id, duration_ms)
+            .await
     }
 
-    pub async fn release_lock(&self, workflow_instance_id: &str, worker_id: &str) -> Result<(), RepositoryError> {
-        self.repository.release_lock(workflow_instance_id, worker_id).await
+    pub async fn release_lock(
+        &self,
+        workflow_instance_id: &str,
+        worker_id: &str,
+    ) -> Result<(), RepositoryError> {
+        self.repository
+            .release_lock(workflow_instance_id, worker_id)
+            .await
     }
 
-    pub async fn save_workflow_instance(&self, instance: &WorkflowInstanceEntity) -> Result<(), RepositoryError> {
+    pub async fn save_workflow_instance(
+        &self,
+        instance: &WorkflowInstanceEntity,
+    ) -> Result<(), RepositoryError> {
         // CAS is handled inside the repository by checking the epoch.
         // We do not increment the epoch here, the repository should do that during the update
         // to ensure it accurately reflects the DB state.
@@ -257,10 +390,7 @@ impl WorkflowInstanceService {
         to: &WorkflowInstanceStatus,
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
         if !from.can_transition_to(to) {
-            return Err(format!(
-                "invalid state transition: {} -> {}",
-                from, to
-            ).into());
+            return Err(format!("invalid state transition: {} -> {}", from, to).into());
         }
         self.repository
             .transfer_status(workflow_instance_id, from, to)
@@ -279,11 +409,9 @@ impl WorkflowInstanceService {
         to: WorkflowInstanceStatus,
     ) -> Result<WorkflowInstanceStatus, RepositoryError> {
         let old_status = instance.status.clone();
-        let updated = self.transfer_status(
-            &instance.workflow_instance_id,
-            &instance.status,
-            &to,
-        ).await?;
+        let updated = self
+            .transfer_status(&instance.workflow_instance_id, &instance.status, &to)
+            .await?;
         instance.status = to;
         instance.epoch = updated.epoch;
         instance.updated_at = updated.updated_at;
@@ -294,7 +422,9 @@ impl WorkflowInstanceService {
     ///
     /// Prefer `transition_instance` in Worker contexts where you hold `&mut WorkflowInstanceEntity`,
     /// which automatically syncs `status`, `epoch`, and `updated_at` in memory.
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn start_instance(
         &self,
         workflow_instance_id: &str,
@@ -303,11 +433,14 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Pending,
             &WorkflowInstanceStatus::Running,
-        ).await
+        )
+        .await
     }
 
     /// Running -> Completed
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn complete_instance(
         &self,
         workflow_instance_id: &str,
@@ -316,11 +449,14 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Running,
             &WorkflowInstanceStatus::Completed,
-        ).await
+        )
+        .await
     }
 
     /// Running -> Failed
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn fail_instance(
         &self,
         workflow_instance_id: &str,
@@ -329,11 +465,14 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Running,
             &WorkflowInstanceStatus::Failed,
-        ).await
+        )
+        .await
     }
 
     /// Running -> Suspended (e.g. approval node awaiting external action)
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn suspend_instance(
         &self,
         workflow_instance_id: &str,
@@ -342,11 +481,14 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Running,
             &WorkflowInstanceStatus::Suspended,
-        ).await
+        )
+        .await
     }
 
     /// Running -> Await (yield CPU and wait for async callback)
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn await_instance(
         &self,
         workflow_instance_id: &str,
@@ -355,7 +497,8 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Running,
             &WorkflowInstanceStatus::Await,
-        ).await
+        )
+        .await
     }
 
     /// Deprecated: use `retry_workflow_node` instead (which handles both atomic and container nodes).
@@ -364,14 +507,20 @@ impl WorkflowInstanceService {
         &self,
         workflow_instance_id: &str,
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
-        let mut instance = self.transfer_status(
-            workflow_instance_id,
-            &WorkflowInstanceStatus::Failed,
-            &WorkflowInstanceStatus::Pending,
-        ).await?;
+        let mut instance = self
+            .transfer_status(
+                workflow_instance_id,
+                &WorkflowInstanceStatus::Failed,
+                &WorkflowInstanceStatus::Pending,
+            )
+            .await?;
 
         let current_node_id = instance.get_current_node();
-        if let Some(node) = instance.nodes.iter_mut().find(|n| n.node_id == current_node_id) {
+        if let Some(node) = instance
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == current_node_id)
+        {
             if node.status == NodeExecutionStatus::Failed {
                 node.status = NodeExecutionStatus::Pending;
                 node.error_message = None;
@@ -393,11 +542,14 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Suspended,
             &WorkflowInstanceStatus::Pending,
-        ).await
+        )
+        .await
     }
 
     /// Await -> Pending (callback received, ready to be scheduled again)
-    #[deprecated(note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly")]
+    #[deprecated(
+        note = "use transition_instance in Worker contexts; for API/Sweeper use transfer_status directly"
+    )]
     pub async fn wake_from_await(
         &self,
         workflow_instance_id: &str,
@@ -406,7 +558,8 @@ impl WorkflowInstanceService {
             workflow_instance_id,
             &WorkflowInstanceStatus::Await,
             &WorkflowInstanceStatus::Pending,
-        ).await
+        )
+        .await
     }
 
     /// Failed | Suspended -> Canceled (user gives up)
@@ -414,13 +567,16 @@ impl WorkflowInstanceService {
         &self,
         workflow_instance_id: &str,
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
-        let instance = self.get_workflow_instance(workflow_instance_id.to_string()).await?;
+        let instance = self
+            .get_workflow_instance(workflow_instance_id.to_string())
+            .await?;
 
         if instance.status.is_terminal() {
             return Err(format!(
                 "cannot cancel instance in terminal state: {}",
                 instance.status
-            ).into());
+            )
+            .into());
         }
 
         match instance.status {
@@ -429,12 +585,14 @@ impl WorkflowInstanceService {
                     workflow_instance_id,
                     &instance.status,
                     &WorkflowInstanceStatus::Canceled,
-                ).await
+                )
+                .await
             }
             other => Err(format!(
                 "cannot cancel instance in state: {}, only Failed or Suspended can be canceled",
                 other
-            ).into()),
+            )
+            .into()),
         }
     }
 
@@ -468,10 +626,7 @@ impl WorkflowInstanceService {
             .ok_or_else(|| format!("node not found: {}", node_id))?;
 
         let node = &inst.nodes[idx];
-        let is_container = matches!(
-            node.node_type,
-            TaskType::Parallel | TaskType::ForkJoin
-        );
+        let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
 
         if matches!(node.node_type, TaskType::SubWorkflow) {
             return Err(
@@ -602,10 +757,7 @@ impl WorkflowInstanceService {
             .ok_or_else(|| format!("node not found: {}", node_id))?;
 
         let node = &inst.nodes[idx];
-        let is_container = matches!(
-            node.node_type,
-            TaskType::Parallel | TaskType::ForkJoin
-        );
+        let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
 
         if matches!(node.node_type, TaskType::SubWorkflow) {
             return Err(
@@ -645,7 +797,11 @@ impl WorkflowInstanceService {
                 ));
             }
             // Clear task_instance output/error but preserve input (resolved HTTP snapshot)
-            if let Ok(mut ti) = self.task_instance_svc.get_task_instance_entity(cid.to_string()).await {
+            if let Ok(mut ti) = self
+                .task_instance_svc
+                .get_task_instance_entity(cid.to_string())
+                .await
+            {
                 ti.output = None;
                 ti.error_message = None;
                 let _ = self.task_instance_svc.update_task_instance_entity(ti).await;
@@ -720,7 +876,9 @@ impl WorkflowInstanceService {
         status: &WorkflowInstanceStatus,
         limit: u32,
     ) -> Result<Vec<WorkflowInstanceEntity>, RepositoryError> {
-        self.repository.scan_instances_by_status(status, limit).await
+        self.repository
+            .scan_instances_by_status(status, limit)
+            .await
     }
 
     pub async fn force_clear_lock(
@@ -739,7 +897,9 @@ impl WorkflowInstanceService {
         workflow_instance_id: &str,
         to: &WorkflowInstanceStatus,
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
-        let instance = self.get_workflow_instance(workflow_instance_id.to_string()).await?;
+        let instance = self
+            .get_workflow_instance(workflow_instance_id.to_string())
+            .await?;
         self.repository
             .transfer_status(workflow_instance_id, &instance.status, to)
             .await
@@ -749,12 +909,20 @@ impl WorkflowInstanceService {
     /// workflow node is skipped. Sets the user-provided output and clears
     /// the error so the record stays consistent with the embedded copy.
     async fn mark_task_instance_skipped(&self, task_instance_id: &str, output: &JsonValue) {
-        match self.task_instance_svc.get_task_instance_entity(task_instance_id.to_string()).await {
+        match self
+            .task_instance_svc
+            .get_task_instance_entity(task_instance_id.to_string())
+            .await
+        {
             Ok(mut task_inst) => {
                 task_inst.task_status = TaskInstanceStatus::Skipped;
                 task_inst.output = Some(output.clone());
                 task_inst.error_message = None;
-                if let Err(e) = self.task_instance_svc.update_task_instance_entity(task_inst).await {
+                if let Err(e) = self
+                    .task_instance_svc
+                    .update_task_instance_entity(task_inst)
+                    .await
+                {
                     warn!(task_instance_id = %task_instance_id, error = %e,
                         "failed to mark task_instance as Skipped");
                 }

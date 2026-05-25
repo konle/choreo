@@ -13,7 +13,9 @@ use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::TaskTemplate;
 use crate::task::service::TaskInstanceService;
 use crate::variable::service::VariableService;
-use crate::workflow::entity::workflow_definition::{WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+use crate::workflow::entity::workflow_definition::{
+    WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+};
 use crate::workflow::service::WorkflowInstanceService;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -128,7 +130,10 @@ impl PluginExecutor for PluginManager {
         let Some(ref task_svc) = self.task_instance_svc else {
             return true; // conservative: no service available
         };
-        match task_svc.get_task_instance_entity(task_instance_id.to_string()).await {
+        match task_svc
+            .get_task_instance_entity(task_instance_id.to_string())
+            .await
+        {
             Ok(task) => {
                 matches!(
                     task.task_status,
@@ -146,7 +151,11 @@ impl PluginExecutor for PluginManager {
     ) -> ChildStatus {
         match task_template {
             TaskTemplate::SubWorkflow(_) => {
-                match self.workflow_instance_svc.get_workflow_instance(child_task_instance_id.to_string()).await {
+                match self
+                    .workflow_instance_svc
+                    .get_workflow_instance(child_task_instance_id.to_string())
+                    .await
+                {
                     Ok(wf) => {
                         use crate::shared::workflow::WorkflowInstanceStatus;
                         match wf.status {
@@ -159,9 +168,7 @@ impl PluginExecutor for PluginManager {
                             WorkflowInstanceStatus::Pending
                             | WorkflowInstanceStatus::Running
                             | WorkflowInstanceStatus::Await
-                            | WorkflowInstanceStatus::Suspended => {
-                                ChildStatus::Running
-                            }
+                            | WorkflowInstanceStatus::Suspended => ChildStatus::Running,
                             WorkflowInstanceStatus::Canceled => {
                                 ChildStatus::Failed(None, Some("Canceled".into()))
                             }
@@ -174,7 +181,10 @@ impl PluginExecutor for PluginManager {
                 let Some(ref task_svc) = self.task_instance_svc else {
                     return ChildStatus::NotFound;
                 };
-                match task_svc.get_task_instance_entity(child_task_instance_id.to_string()).await {
+                match task_svc
+                    .get_task_instance_entity(child_task_instance_id.to_string())
+                    .await
+                {
                     Ok(task) => {
                         use crate::shared::workflow::TaskInstanceStatus;
                         match task.task_status {

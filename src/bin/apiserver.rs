@@ -1,24 +1,30 @@
+use clap::Parser;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use clap::Parser;
-use tracing::{info, error};
+use tracing::{error, info};
 
-use infrastructure::mongodb::task::task_repository_impl::{TaskRepositoryImpl, TaskInstanceRepositoryImpl};
-use infrastructure::mongodb::tenant::tenant_repository_impl::TenantRepositoryImpl;
-use infrastructure::mongodb::user::user_repository_impl::{UserRepositoryImpl, UserTenantRoleRepositoryImpl};
 use infrastructure::mongodb::apikey::apikey_repository_impl::ApiKeyRepositoryImpl;
 use infrastructure::mongodb::approval::approval_repository_impl::ApprovalRepositoryImpl;
+use infrastructure::mongodb::task::task_repository_impl::{
+    TaskInstanceRepositoryImpl, TaskRepositoryImpl,
+};
+use infrastructure::mongodb::tenant::tenant_repository_impl::TenantRepositoryImpl;
+use infrastructure::mongodb::user::user_repository_impl::{
+    UserRepositoryImpl, UserTenantRoleRepositoryImpl,
+};
 use infrastructure::mongodb::variable::variable_repository_impl::VariableRepositoryImpl;
-use infrastructure::mongodb::workflow::workflow_repository_impl::{WorkflowDefinitionRepositoryImpl, WorkflowInstanceRepositoryImpl};
+use infrastructure::mongodb::workflow::workflow_repository_impl::{
+    WorkflowDefinitionRepositoryImpl, WorkflowInstanceRepositoryImpl,
+};
 use infrastructure::queue::consumer;
 use infrastructure::queue::dispatcher::ApalisDispatcher;
 
-use domain::task::service::{TaskService, TaskInstanceService};
-use domain::tenant::service::TenantService;
-use domain::user::service::UserService;
-use domain::user::entity::TenantRole;
 use domain::apikey::service::ApiKeyService;
 use domain::approval::service::ApprovalService;
+use domain::task::service::{TaskInstanceService, TaskService};
+use domain::tenant::service::TenantService;
+use domain::user::entity::TenantRole;
+use domain::user::service::UserService;
 use domain::variable::service::VariableService;
 use domain::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 
@@ -44,14 +50,13 @@ struct Cli {
     init: bool,
 }
 
-async fn bootstrap(
-    config: &AppConfig,
-    user_service: &UserService,
-    tenant_service: &TenantService,
-) {
+async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_service: &TenantService) {
     let init = &config.init;
 
-    let admin = match user_service.get_user_by_username(&init.admin_username).await {
+    let admin = match user_service
+        .get_user_by_username(&init.admin_username)
+        .await
+    {
         Ok(existing) => {
             info!(username = %init.admin_username, "super admin already exists, skipping");
             existing
@@ -80,7 +85,10 @@ async fn bootstrap(
         }
         Err(_) => {
             let t = tenant_service
-                .create_tenant(init.default_tenant_name.clone(), init.default_tenant_description.clone())
+                .create_tenant(
+                    init.default_tenant_name.clone(),
+                    init.default_tenant_description.clone(),
+                )
                 .await
                 .expect("failed to create default tenant");
             info!(tenant = %init.default_tenant_name, tenant_id = %t.tenant_id, "created tenant");
@@ -88,7 +96,10 @@ async fn bootstrap(
         }
     };
 
-    match user_service.get_role(&admin.user_id, &tenant.tenant_id).await {
+    match user_service
+        .get_role(&admin.user_id, &tenant.tenant_id)
+        .await
+    {
         Ok(_) => {
             info!(tenant_id = %tenant.tenant_id, "admin already has role, skipping");
         }
@@ -101,8 +112,10 @@ async fn bootstrap(
         }
     }
 
-    info!("bootstrap complete ─ username: {}, tenant: {} (id: {})",
-        init.admin_username, init.default_tenant_name, tenant.tenant_id);
+    info!(
+        "bootstrap complete ─ username: {}, tenant: {} (id: {})",
+        init.admin_username, init.default_tenant_name, tenant.tenant_id
+    );
 }
 
 #[tokio::main]
@@ -130,9 +143,11 @@ async fn main() {
         Arc::new(ApalisDispatcher::new(task_storage, workflow_storage));
 
     let db = mongo_client.database("workflow");
-    infrastructure::mongodb::indexes::ensure_all_indexes(&db).await.unwrap_or_else(|e| {
-        error!(error = %e, "failed to ensure indexes");
-    });
+    infrastructure::mongodb::indexes::ensure_all_indexes(&db)
+        .await
+        .unwrap_or_else(|e| {
+            error!(error = %e, "failed to ensure indexes");
+        });
     info!("ensured MongoDB indexes");
 
     let task_repo = Arc::new(TaskRepositoryImpl::new(mongo_client.clone()));
@@ -152,22 +167,32 @@ async fn main() {
     let user_service = UserService::new(user_repo, role_repo.clone());
     let approval_service = ApprovalService::new(approval_repo, role_repo);
     let apikey_service = ApiKeyService::new(apikey_repo);
-    let variable_service = VariableService::new(variable_repo, config.security.variable_encrypt_key.clone());
+    let variable_service =
+        VariableService::new(variable_repo, config.security.variable_encrypt_key.clone());
     let workflow_def_service = WorkflowDefinitionService::new(workflow_def_repo);
-    let workflow_inst_service = WorkflowInstanceService::new(workflow_inst_repo, task_instance_service.clone());
+    let workflow_inst_service =
+        WorkflowInstanceService::new(workflow_inst_repo, task_instance_service.clone());
 
     if cli.init {
         bootstrap(&config, &user_service, &tenant_service).await;
     }
 
-    let auth_handler = Arc::new(AuthHandler::new(user_service.clone(), tenant_service.clone()));
+    let auth_handler = Arc::new(AuthHandler::new(
+        user_service.clone(),
+        tenant_service.clone(),
+    ));
     let tenant_handler = Arc::new(TenantHandler::new(tenant_service));
     let user_handler = Arc::new(UserHandler::new(user_service));
     let approval_handler = Arc::new(ApprovalHandler::new(approval_service, dispatcher.clone()));
     let apikey_handler = Arc::new(ApiKeyHandler::new(apikey_service));
     let variable_handler = Arc::new(VariableHandler::new(variable_service.clone()));
     let task_handler = Arc::new(TaskHandler::new(task_service.clone()));
-    let task_instance_handler = Arc::new(TaskInstanceHandler::new((*task_instance_service).clone(), task_service, variable_service, dispatcher.clone()));
+    let task_instance_handler = Arc::new(TaskInstanceHandler::new(
+        (*task_instance_service).clone(),
+        task_service,
+        variable_service,
+        dispatcher.clone(),
+    ));
     let workflow_handler = Arc::new(WorkflowHandler::new(workflow_def_service.clone()));
     let workflow_instance_handler = Arc::new(WorkflowInstanceHandler::new(
         workflow_def_service,
@@ -189,12 +214,10 @@ async fn main() {
     );
 
     let addr = format!("0.0.0.0:{}", config.server.port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| {
-            error!(addr = %addr, error = %e, "failed to bind");
-            std::process::exit(1);
-        });
+    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        error!(addr = %addr, error = %e, "failed to bind");
+        std::process::exit(1);
+    });
 
     info!(addr = %addr, "apiserver ready");
     axum::serve(listener, app).await.unwrap_or_else(|e| {

@@ -56,7 +56,9 @@ impl TenantRole {
         match perm {
             Permission::TenantManage => false,
             Permission::UserManage => matches!(self, TenantRole::TenantAdmin),
-            Permission::TemplateWrite => matches!(self, TenantRole::TenantAdmin | TenantRole::Developer),
+            Permission::TemplateWrite => {
+                matches!(self, TenantRole::TenantAdmin | TenantRole::Developer)
+            }
             Permission::InstanceExecute | Permission::ApprovalDecide => matches!(
                 self,
                 TenantRole::TenantAdmin | TenantRole::Developer | TenantRole::Operator

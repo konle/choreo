@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-
-fn default_page() -> u64 { 1 }
-fn default_page_size() -> u64 { 10 }
+fn default_page() -> u64 {
+    1
+}
+fn default_page_size() -> u64 {
+    10
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Pagination {
@@ -25,14 +28,17 @@ pub struct PaginatedData<T> {
 pub struct SortQuery {
     #[serde(default = "default_sort_field")]
     pub sort_by: String,
-    
+
     #[serde(default = "default_sort_order")]
     pub sort_order: String, // "asc" 或 "desc"
 }
 
-fn default_sort_field() -> String { "created_at".to_string() }
-fn default_sort_order() -> String { "desc".to_string() }
-
+fn default_sort_field() -> String {
+    "created_at".to_string()
+}
+fn default_sort_order() -> String {
+    "desc".to_string()
+}
 
 impl Default for SortQuery {
     fn default() -> Self {
@@ -43,7 +49,7 @@ impl Default for SortQuery {
     }
 }
 
-impl Default for Pagination { 
+impl Default for Pagination {
     fn default() -> Self {
         Self {
             page: default_page(),
@@ -60,6 +66,9 @@ impl Pagination {
 
 impl SortQuery {
     pub fn new(sort_by: String, sort_order: String) -> Self {
-        Self { sort_by, sort_order }
+        Self {
+            sort_by,
+            sort_order,
+        }
     }
 }

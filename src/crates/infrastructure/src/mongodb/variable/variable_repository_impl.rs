@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use domain::variable::entity::{VariableEntity, VariableScope};
+use domain::variable::repository::{RepositoryError, VariableRepository};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use mongodb::{Client, Collection, Database};
-use domain::variable::entity::{VariableEntity, VariableScope};
-use domain::variable::repository::{RepositoryError, VariableRepository};
 
 pub struct VariableRepositoryImpl {
     pub client: Client,
@@ -15,7 +15,11 @@ impl VariableRepositoryImpl {
     pub fn new(client: Client) -> Self {
         let database = client.database("workflow");
         let collection = database.collection("variables");
-        Self { client, database, collection }
+        Self {
+            client,
+            database,
+            collection,
+        }
     }
 }
 
@@ -33,8 +37,13 @@ impl VariableRepository for VariableRepositoryImpl {
         Ok(entity.clone())
     }
 
-    async fn get_by_id(&self, tenant_id: &str, id: &str) -> Result<VariableEntity, RepositoryError> {
-        let entity = self.collection
+    async fn get_by_id(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<VariableEntity, RepositoryError> {
+        let entity = self
+            .collection
             .find_one(doc! { "tenant_id": tenant_id, "id": id })
             .await?
             .ok_or_else(|| format!("variable not found: {} in tenant {}", id, tenant_id))?;
@@ -48,7 +57,9 @@ impl VariableRepository for VariableRepositoryImpl {
     }
 
     async fn delete(&self, tenant_id: &str, id: &str) -> Result<(), RepositoryError> {
-        self.collection.delete_one(doc! { "tenant_id": tenant_id, "id": id }).await?;
+        self.collection
+            .delete_one(doc! { "tenant_id": tenant_id, "id": id })
+            .await?;
         Ok(())
     }
 
@@ -58,7 +69,8 @@ impl VariableRepository for VariableRepositoryImpl {
         scope: &VariableScope,
         scope_id: &str,
     ) -> Result<Vec<VariableEntity>, RepositoryError> {
-        let cursor = self.collection
+        let cursor = self
+            .collection
             .find(doc! {
                 "tenant_id": tenant_id,
                 "scope": scope_str(scope),
@@ -76,7 +88,8 @@ impl VariableRepository for VariableRepositoryImpl {
         scope_id: &str,
         key: &str,
     ) -> Result<Option<VariableEntity>, RepositoryError> {
-        let entity = self.collection
+        let entity = self
+            .collection
             .find_one(doc! {
                 "tenant_id": tenant_id,
                 "scope": scope_str(scope),

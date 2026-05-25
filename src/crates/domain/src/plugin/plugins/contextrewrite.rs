@@ -6,7 +6,9 @@ use crate::plugin::interface::{ExecutionResult, PluginExecutor, PluginInterface}
 use crate::plugin::rhai_engine;
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::{MergeMode, TaskTemplate};
-use crate::workflow::entity::workflow_definition::{WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+use crate::workflow::entity::workflow_definition::{
+    WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+};
 
 pub struct ContextRewritePlugin {}
 
@@ -28,26 +30,28 @@ impl PluginInterface for ContextRewritePlugin {
             TaskTemplate::ContextRewrite(t) => t,
             other => {
                 error!(node_id = %node_instance.node_id, template = ?other, "invalid template for ContextRewritePlugin");
-                return Err(anyhow::anyhow!("Invalid task template for ContextRewritePlugin"));
+                return Err(anyhow::anyhow!(
+                    "Invalid task template for ContextRewritePlugin"
+                ));
             }
         };
 
         let engine = rhai_engine::create_engine();
-        let ast = rhai_engine::compile_script(&engine, &template.script)
-            .map_err(|e| {
-                error!(
-                    workflow_instance_id = %workflow_instance.workflow_instance_id,
-                    node_id = %node_instance.node_id,
-                    error = %e,
-                    "failed to compile ContextRewrite script"
-                );
-                e
-            })?;
+        let ast = rhai_engine::compile_script(&engine, &template.script).map_err(|e| {
+            error!(
+                workflow_instance_id = %workflow_instance.workflow_instance_id,
+                node_id = %node_instance.node_id,
+                error = %e,
+                "failed to compile ContextRewrite script"
+            );
+            e
+        })?;
 
         let mut scope = Scope::new();
         rhai_engine::inject_context(&mut scope, &node_instance.context);
 
-        let result = engine.eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &ast)
+        let result = engine
+            .eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &ast)
             .map_err(|e| {
                 error!(
                     workflow_instance_id = %workflow_instance.workflow_instance_id,
@@ -106,20 +110,53 @@ mod tests {
     use super::*;
     use crate::plugin::interface::PluginInterface;
     use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
-    use crate::task::entity::task_definition::{ContextRewriteTemplate, TaskInstanceEntity, TaskTemplate};
-    use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+    use crate::task::entity::task_definition::{
+        ContextRewriteTemplate, TaskInstanceEntity, TaskTemplate,
+    };
+    use crate::workflow::entity::workflow_definition::{
+        NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+    };
     use chrono::Utc;
 
     struct StubExecutor;
 
     #[async_trait::async_trait]
     impl PluginExecutor for StubExecutor {
-        async fn execute_node_instance(&self, _: &mut WorkflowNodeInstanceEntity, _: &mut WorkflowInstanceEntity) -> anyhow::Result<ExecutionResult> { unreachable!() }
-        async fn handle_node_callback(&self, _: &mut WorkflowNodeInstanceEntity, _: &mut WorkflowInstanceEntity, _: &str, _: &NodeExecutionStatus, _: &Option<serde_json::Value>, _: &Option<String>, _: &Option<serde_json::Value>) -> anyhow::Result<ExecutionResult> { unreachable!() }
-        async fn resolve_child_status(&self, _: &str, _: &TaskTemplate) -> crate::plugin::interface::ChildStatus { unreachable!() }
+        async fn execute_node_instance(
+            &self,
+            _: &mut WorkflowNodeInstanceEntity,
+            _: &mut WorkflowInstanceEntity,
+        ) -> anyhow::Result<ExecutionResult> {
+            unreachable!()
+        }
+        async fn handle_node_callback(
+            &self,
+            _: &mut WorkflowNodeInstanceEntity,
+            _: &mut WorkflowInstanceEntity,
+            _: &str,
+            _: &NodeExecutionStatus,
+            _: &Option<serde_json::Value>,
+            _: &Option<String>,
+            _: &Option<serde_json::Value>,
+        ) -> anyhow::Result<ExecutionResult> {
+            unreachable!()
+        }
+        async fn resolve_child_status(
+            &self,
+            _: &str,
+            _: &TaskTemplate,
+        ) -> crate::plugin::interface::ChildStatus {
+            unreachable!()
+        }
     }
 
-    fn make_node(plugin: &ContextRewritePlugin, wf: &WorkflowInstanceEntity, node_id: &str, script: &str, merge_mode: MergeMode) -> WorkflowNodeInstanceEntity {
+    fn make_node(
+        plugin: &ContextRewritePlugin,
+        wf: &WorkflowInstanceEntity,
+        node_id: &str,
+        script: &str,
+        merge_mode: MergeMode,
+    ) -> WorkflowNodeInstanceEntity {
         let now = Utc::now();
         WorkflowNodeInstanceEntity {
             node_id: node_id.to_string(),
@@ -127,34 +164,56 @@ mod tests {
             task_instance: TaskInstanceEntity {
                 id: format!("ti-{}", node_id),
                 tenant_id: wf.tenant_id.clone(),
-                task_id: "".into(), task_name: "rewrite".to_string(), task_type: plugin.plugin_type(),
+                task_id: "".into(),
+                task_name: "rewrite".to_string(),
+                task_type: plugin.plugin_type(),
                 task_template: TaskTemplate::ContextRewrite(ContextRewriteTemplate {
-                    name: "rewrite".into(), script: script.into(), merge_mode,
+                    name: "rewrite".into(),
+                    script: script.into(),
+                    merge_mode,
                 }),
                 task_status: TaskInstanceStatus::Pending,
                 task_instance_id: format!("{}-{}", wf.workflow_instance_id, node_id),
-                created_at: now, updated_at: now, deleted_at: None,
-                input: None, output: None, error_message: None, execution_duration: None,
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+                input: None,
+                output: None,
+                error_message: None,
+                execution_duration: None,
                 caller_context: None,
             },
-            context: serde_json::json!({}), next_node: None,
+            context: serde_json::json!({}),
+            next_node: None,
             status: NodeExecutionStatus::Pending,
-            error_message: None, created_at: now, updated_at: now,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
     fn make_instance(initial_ctx: serde_json::Value) -> WorkflowInstanceEntity {
         let now = Utc::now();
         WorkflowInstanceEntity {
-            workflow_instance_id: "wf1".into(), tenant_id: "t1".into(),
-            workflow_meta_id: "m1".into(), workflow_version: 1,
+            workflow_instance_id: "wf1".into(),
+            tenant_id: "t1".into(),
+            workflow_meta_id: "m1".into(),
+            workflow_version: 1,
             status: WorkflowInstanceStatus::Running,
-            created_at: now, updated_at: now, deleted_at: None,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
             context: initial_ctx,
-            entry_node: "r1".into(), current_node: "r1".into(),
-            nodes: vec![], epoch: 0,
-            locked_by: None, locked_duration: None, locked_at: None,
-            parent_context: None, depth: 0, created_by: None,
+            entry_node: "r1".into(),
+            current_node: "r1".into(),
+            nodes: vec![],
+            epoch: 0,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth: 0,
+            created_by: None,
         }
     }
 
@@ -162,9 +221,18 @@ mod tests {
     async fn merge_mode_merges_new_keys() {
         let plugin = ContextRewritePlugin::new();
         let mut wf = make_instance(serde_json::json!({"existing_key": "old_value"}));
-        let mut node = make_node(&plugin, &wf, "r1", "#{new_key: \"new_value\"}", MergeMode::Merge);
+        let mut node = make_node(
+            &plugin,
+            &wf,
+            "r1",
+            "#{new_key: \"new_value\"}",
+            MergeMode::Merge,
+        );
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
         assert_eq!(wf.context["existing_key"], "old_value");
@@ -175,9 +243,18 @@ mod tests {
     async fn merge_mode_existing_keys_overwritten() {
         let plugin = ContextRewritePlugin::new();
         let mut wf = make_instance(serde_json::json!({"key": "old_value"}));
-        let mut node = make_node(&plugin, &wf, "r2", "#{key: \"new_value\"}", MergeMode::Merge);
+        let mut node = make_node(
+            &plugin,
+            &wf,
+            "r2",
+            "#{key: \"new_value\"}",
+            MergeMode::Merge,
+        );
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
         assert_eq!(wf.context["key"], "new_value");
@@ -189,7 +266,10 @@ mod tests {
         let mut wf = make_instance(serde_json::json!({"existing_key": "old_value"}));
         let mut node = make_node(&plugin, &wf, "r3", "#{only_new: 42}", MergeMode::Replace);
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
         assert_eq!(wf.context.get("existing_key"), None);
@@ -203,7 +283,10 @@ mod tests {
         let script = "#{}";
         let mut node = make_node(&plugin, &wf, "r5", script, MergeMode::Merge);
 
-        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await.unwrap();
+        let result = plugin
+            .execute(&StubExecutor, &mut node, &mut wf)
+            .await
+            .unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
         assert_eq!(wf.context["existing"], "value");
@@ -217,22 +300,41 @@ mod tests {
             node_id: "bad".into(),
             node_type: TaskType::ContextRewrite,
             task_instance: TaskInstanceEntity {
-                id: "ti-bad".into(), tenant_id: "t1".into(),
-                task_id: "".into(), task_name: "bad".into(), task_type: TaskType::ContextRewrite,
-                task_template: TaskTemplate::Http(crate::task::entity::task_definition::TaskHttpTemplate {
-                    url: "/x".into(), method: crate::task::entity::task_definition::HttpMethod::Get,
-                    headers: vec![], body: vec![], form: vec![],
-                    retry_count: 0, retry_delay: 0, timeout: 30, success_condition: None,
-                }),
+                id: "ti-bad".into(),
+                tenant_id: "t1".into(),
+                task_id: "".into(),
+                task_name: "bad".into(),
+                task_type: TaskType::ContextRewrite,
+                task_template: TaskTemplate::Http(
+                    crate::task::entity::task_definition::TaskHttpTemplate {
+                        url: "/x".into(),
+                        method: crate::task::entity::task_definition::HttpMethod::Get,
+                        headers: vec![],
+                        body: vec![],
+                        form: vec![],
+                        retry_count: 0,
+                        retry_delay: 0,
+                        timeout: 30,
+                        success_condition: None,
+                    },
+                ),
                 task_status: TaskInstanceStatus::Pending,
                 task_instance_id: "bad".into(),
-                created_at: Utc::now(), updated_at: Utc::now(), deleted_at: None,
-                input: None, output: None, error_message: None, execution_duration: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                deleted_at: None,
+                input: None,
+                output: None,
+                error_message: None,
+                execution_duration: None,
                 caller_context: None,
             },
-            context: serde_json::json!({}), next_node: None,
+            context: serde_json::json!({}),
+            next_node: None,
             status: NodeExecutionStatus::Pending,
-            error_message: None, created_at: Utc::now(), updated_at: Utc::now(),
+            error_message: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         };
 
         let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await;
@@ -251,6 +353,9 @@ mod tests {
 
     #[test]
     fn plugin_type_is_context_rewrite() {
-        assert_eq!(ContextRewritePlugin::new().plugin_type(), TaskType::ContextRewrite);
+        assert_eq!(
+            ContextRewritePlugin::new().plugin_type(),
+            TaskType::ContextRewrite
+        );
     }
 }

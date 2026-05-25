@@ -1,5 +1,6 @@
-pub mod approval;
 pub mod apikey;
+pub mod approval;
+pub mod plugin;
 pub mod shared;
 pub mod sweeper;
 pub mod task;
@@ -7,4 +8,3 @@ pub mod tenant;
 pub mod user;
 pub mod variable;
 pub mod workflow;
-pub mod plugin;

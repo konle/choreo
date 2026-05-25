@@ -13,5 +13,8 @@ pub fn routes(
 ) -> Router {
     Router::new()
         .merge(task_handler::routes(task_handler))
-        .nest("/instance", task_instance_handler::routes(task_instance_handler))
+        .nest(
+            "/instance",
+            task_instance_handler::routes(task_instance_handler),
+        )
 }

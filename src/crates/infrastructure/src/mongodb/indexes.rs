@@ -1,7 +1,9 @@
-use mongodb::bson::doc;
 use mongodb::Database;
+use mongodb::bson::doc;
 
-pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn ensure_all_indexes(
+    db: &Database,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ---- workflow_entities: (workflow_meta_id, version) unique ----
     db.run_command(doc! {
         "createIndexes": "workflow_entities",
@@ -17,7 +19,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "workflow_meta_id": 1 }, "name": "uk_workflow_meta_id", "unique": true },
             { "key": { "tenant_id": 1 }, "name": "idx_tenant_id" },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- workflow_instances: (workflow_instance_id) unique + (tenant_id) + (workflow_meta_id) ----
     db.run_command(doc! {
@@ -38,7 +41,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "tenant_id": 1 }, "name": "idx_tenant_id" },
             { "key": { "tenant_id": 1, "task_type": 1 }, "name": "idx_tenant_id_task_type" },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- task_instances: (task_instance_id) unique + (tenant_id) ----
     db.run_command(doc! {
@@ -47,7 +51,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "task_instance_id": 1 }, "name": "uk_task_instance_id", "unique": true },
             { "key": { "tenant_id": 1 }, "name": "idx_tenant_id" },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- tenants: (tenant_id) unique + (name) unique ----
     db.run_command(doc! {
@@ -56,7 +61,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "tenant_id": 1 }, "name": "uk_tenant_id", "unique": true },
             { "key": { "name": 1 }, "name": "uk_name", "unique": true },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- users: (user_id) unique + (username) unique ----
     db.run_command(doc! {
@@ -65,7 +71,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "user_id": 1 }, "name": "uk_user_id", "unique": true },
             { "key": { "username": 1 }, "name": "uk_username", "unique": true },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- user_tenant_roles: (user_id, tenant_id) unique + (tenant_id) ----
     db.run_command(doc! {
@@ -83,7 +90,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "tenant_id": 1, "id": 1 }, "name": "uk_tenant_id_id", "unique": true },
             { "key": { "tenant_id": 1 }, "name": "idx_tenant_id" },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- variables: (tenant_id, id) unique + (tenant_id, scope, scope_id) ----
     db.run_command(doc! {
@@ -92,7 +100,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "tenant_id": 1, "id": 1 }, "name": "uk_tenant_id_id", "unique": true },
             { "key": { "tenant_id": 1, "scope": 1, "scope_id": 1 }, "name": "idx_tenant_scope" },
         ],
-    }).await?;
+    })
+    .await?;
 
     // ---- api_keys: (tenant_id, id) unique + (key_prefix) unique + (tenant_id, name) unique ----
     db.run_command(doc! {
@@ -102,7 +111,8 @@ pub async fn ensure_all_indexes(db: &Database) -> Result<(), Box<dyn std::error:
             { "key": { "key_prefix": 1 }, "name": "uk_key_prefix", "unique": true },
             { "key": { "tenant_id": 1, "name": 1 }, "name": "uk_tenant_id_name", "unique": true },
         ],
-    }).await?;
+    })
+    .await?;
 
     Ok(())
 }

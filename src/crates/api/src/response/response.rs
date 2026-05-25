@@ -9,7 +9,11 @@ pub struct Response<T> {
 
 impl<T> Response<T> {
     pub fn new(code: i32, message: String, data: Option<T>) -> Self {
-        Self { code, message, data }
+        Self {
+            code,
+            message,
+            data,
+        }
     }
 
     pub fn success(data: T) -> Self {

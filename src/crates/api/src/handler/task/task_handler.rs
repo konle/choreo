@@ -1,17 +1,17 @@
-use axum::{
-    extract::{Extension, Path, Query, State},
-    middleware::from_fn,
-    routing::{get, post, put},
-    Json, Router,
-};
-use domain::shared::workflow::{TaskStatus, TaskType};
-use domain::task::entity::task_definition::{TaskEntity, TaskTemplate};
-use domain::task::service::{CreateTaskCommand, UpdateTaskCommand, TaskService};
-use domain::user::entity::Permission;
 use crate::error::ApiError;
 use crate::middleware::auth::AuthContext;
 use crate::middleware::permission::require_permission;
 use crate::response::response::Response;
+use axum::{
+    Json, Router,
+    extract::{Extension, Path, Query, State},
+    middleware::from_fn,
+    routing::{get, post, put},
+};
+use domain::shared::workflow::{TaskStatus, TaskType};
+use domain::task::entity::task_definition::{TaskEntity, TaskTemplate};
+use domain::task::service::{CreateTaskCommand, TaskService, UpdateTaskCommand};
+use domain::user::entity::Permission;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,10 +79,7 @@ pub fn routes(handler: Arc<TaskHandler>) -> Router {
         .route("/{id}", put(update_task).delete(delete_task))
         .layer(from_fn(require_permission(Permission::TemplateWrite)));
 
-    Router::new()
-        .merge(reads)
-        .merge(writes)
-        .with_state(handler)
+    Router::new().merge(reads).merge(writes).with_state(handler)
 }
 
 async fn create_task(
@@ -90,7 +87,10 @@ async fn create_task(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<Response<TaskEntity>>, ApiError> {
-    let result = handler.service.create_task(auth.tenant_id, req.into()).await?;
+    let result = handler
+        .service
+        .create_task(auth.tenant_id, req.into())
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -100,7 +100,10 @@ async fn list_tasks(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Response<Vec<TaskEntity>>>, ApiError> {
     let result = if let Some(task_type) = params.get("task_type") {
-        handler.service.list_task_entities_by_type(&auth.tenant_id, task_type).await?
+        handler
+            .service
+            .list_task_entities_by_type(&auth.tenant_id, task_type)
+            .await?
     } else {
         handler.service.list_task_entities(&auth.tenant_id).await?
     };
@@ -112,7 +115,10 @@ async fn get_task(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<TaskEntity>>, ApiError> {
-    let result = handler.service.get_task_entity_scoped(&auth.tenant_id, &id).await?;
+    let result = handler
+        .service
+        .get_task_entity_scoped(&auth.tenant_id, &id)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -122,7 +128,10 @@ async fn update_task(
     Path(id): Path<String>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<Json<Response<TaskEntity>>, ApiError> {
-    let result = handler.service.update_task(&auth.tenant_id, &id, req.into()).await?;
+    let result = handler
+        .service
+        .update_task(&auth.tenant_id, &id, req.into())
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -131,6 +140,9 @@ async fn delete_task(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    handler.service.delete_task_entity(&auth.tenant_id, &id).await?;
+    handler
+        .service
+        .delete_task_entity(&auth.tenant_id, &id)
+        .await?;
     Ok(Json(Response::success(())))
 }

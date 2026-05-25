@@ -1,16 +1,16 @@
-use axum::{
-    extract::{Extension, Path, State},
-    routing::{delete, post},
-    Json, Router,
-};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tracing::info;
 use crate::error::ApiError;
 use crate::middleware::auth::AuthContext;
 use crate::response::response::Response;
+use axum::{
+    Json, Router,
+    extract::{Extension, Path, State},
+    routing::{delete, post},
+};
 use domain::user::entity::{TenantRole, UserTenantRole};
 use domain::user::service::UserService;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::info;
 
 #[derive(Deserialize)]
 pub struct AssignRoleRequest {
@@ -146,7 +146,9 @@ fn generate_initial_password() -> String {
     let chars: Vec<char> = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         .chars()
         .collect();
-    (0..12).map(|_| chars[rng.random_range(0..chars.len())]).collect()
+    (0..12)
+        .map(|_| chars[rng.random_range(0..chars.len())])
+        .collect()
 }
 
 async fn create_user(

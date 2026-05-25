@@ -37,12 +37,7 @@ impl TaskRepositoryImpl {
 
 impl TaskInstanceRepositoryImpl {
     // 避免排序注入
-    const ALLOWED_SORT_FIELDS: &[&str] = &[
-        "created_at",
-        "updated_at",
-        "status",
-        "task_id",
-    ];
+    const ALLOWED_SORT_FIELDS: &[&str] = &["created_at", "updated_at", "status", "task_id"];
     pub fn new(client: Client) -> Self {
         let database = client.database("workflow");
         let collection = database.collection("task_instances");
@@ -117,17 +112,18 @@ impl TaskInstanceEntityRepository for TaskInstanceRepositoryImpl {
         let page_size = query.pagination.page_size;
         let skip = (page - 1) * page_size;
         Self::validate_sort_field(&query.sort.sort_by)?;
-        let sort_order:i32 = if query.sort.sort_order == "asc" { 1 } else { -1 };
+        let sort_order: i32 = if query.sort.sort_order == "asc" {
+            1
+        } else {
+            -1
+        };
         let sort_doc = doc! { &query.sort.sort_by: sort_order };
         // let find_options = FindOptions::builder()
         //     .skip(skip as u64)
         //     .limit(page_size as i64)
         //     .sort(sort_doc)
         //     .build();
-        let total = self
-            .collection
-            .count_documents(filter.clone())
-            .await?;
+        let total = self.collection.count_documents(filter.clone()).await?;
 
         let find_options = FindOptions::builder()
             .skip(skip as u64)
@@ -169,8 +165,8 @@ impl TaskInstanceEntityRepository for TaskInstanceRepositoryImpl {
     ) -> Result<TaskInstanceEntity, RepositoryError> {
         let from_bson = mongodb::bson::to_bson(from_status)
             .map_err(|e| format!("serialize from_status: {e}"))?;
-        let to_bson = mongodb::bson::to_bson(to_status)
-            .map_err(|e| format!("serialize to_status: {e}"))?;
+        let to_bson =
+            mongodb::bson::to_bson(to_status).map_err(|e| format!("serialize to_status: {e}"))?;
 
         let filter = doc! {
             "task_instance_id": task_instance_id,
@@ -181,10 +177,16 @@ impl TaskInstanceEntityRepository for TaskInstanceRepositoryImpl {
             "updated_at": chrono::Utc::now().to_rfc3339(),
         };
         if let Some(ref out) = fields.output {
-            set_fields.insert("output", mongodb::bson::to_bson(out).map_err(|e| format!("serialize output: {e}"))?);
+            set_fields.insert(
+                "output",
+                mongodb::bson::to_bson(out).map_err(|e| format!("serialize output: {e}"))?,
+            );
         }
         if let Some(ref inp) = fields.input {
-            set_fields.insert("input", mongodb::bson::to_bson(inp).map_err(|e| format!("serialize input: {e}"))?);
+            set_fields.insert(
+                "input",
+                mongodb::bson::to_bson(inp).map_err(|e| format!("serialize input: {e}"))?,
+            );
         }
         if let Some(ref err) = fields.error_message {
             set_fields.insert("error_message", err);

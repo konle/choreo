@@ -1,9 +1,11 @@
-use async_trait::async_trait;
-use serde_json::{json, Value as JsonValue};
-use crate::shared::workflow::TaskType;
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob};
+use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::TaskTemplate;
-use crate::workflow::entity::workflow_definition::{WorkflowNodeInstanceEntity, WorkflowInstanceEntity, NodeExecutionStatus};
+use crate::workflow::entity::workflow_definition::{
+    NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+};
+use async_trait::async_trait;
+use serde_json::{Value as JsonValue, json};
 
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -15,19 +17,39 @@ pub struct ExecutionResult {
 
 impl ExecutionResult {
     pub fn success(jump_to_node: Option<String>) -> Self {
-        Self { status: NodeExecutionStatus::Success, dispatch_jobs: vec![], dispatch_workflow_jobs: vec![], jump_to_node }
+        Self {
+            status: NodeExecutionStatus::Success,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node,
+        }
     }
 
     pub fn failed() -> Self {
-        Self { status: NodeExecutionStatus::Failed, dispatch_jobs: vec![], dispatch_workflow_jobs: vec![], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Failed,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node: None,
+        }
     }
 
     pub fn suspended() -> Self {
-        Self { status: NodeExecutionStatus::Suspended, dispatch_jobs: vec![], dispatch_workflow_jobs: vec![], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Suspended,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node: None,
+        }
     }
 
     pub fn pending() -> Self {
-        Self { status: NodeExecutionStatus::Pending, dispatch_jobs: vec![], dispatch_workflow_jobs: vec![], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Pending,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node: None,
+        }
     }
 
     pub fn skipped(jump_to_node: Option<String>) -> Self {
@@ -40,15 +62,30 @@ impl ExecutionResult {
     }
 
     pub fn async_dispatch(job: ExecuteTaskJob) -> Self {
-        Self { status: NodeExecutionStatus::Await, dispatch_jobs: vec![job], dispatch_workflow_jobs: vec![], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Await,
+            dispatch_jobs: vec![job],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node: None,
+        }
     }
 
     pub fn async_dispatch_multiple(jobs: Vec<ExecuteTaskJob>) -> Self {
-        Self { status: NodeExecutionStatus::Await, dispatch_jobs: jobs, dispatch_workflow_jobs: vec![], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Await,
+            dispatch_jobs: jobs,
+            dispatch_workflow_jobs: vec![],
+            jump_to_node: None,
+        }
     }
 
     pub fn async_dispatch_workflow(job: ExecuteWorkflowJob) -> Self {
-        Self { status: NodeExecutionStatus::Await, dispatch_jobs: vec![], dispatch_workflow_jobs: vec![job], jump_to_node: None }
+        Self {
+            status: NodeExecutionStatus::Await,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![job],
+            jump_to_node: None,
+        }
     }
 }
 
@@ -78,7 +115,7 @@ pub trait PluginInterface: Send + Sync {
         node_instance.task_instance.input = input.clone();
         node_instance.task_instance.output = output.clone();
         node_instance.task_instance.error_message = error_message.clone();
-        
+
         match status {
             NodeExecutionStatus::Success => Ok(ExecutionResult::success(None)),
             NodeExecutionStatus::Skipped => Ok(ExecutionResult::skipped(None)),
@@ -176,16 +213,21 @@ impl ContainerGatherResult {
         match status {
             ChildStatus::Completed(output) => {
                 self.completed_count += 1;
-                self.results_map.insert(key, json!({ "status": "Success", "output": output }));
+                self.results_map
+                    .insert(key, json!({ "status": "Success", "output": output }));
             }
             ChildStatus::Failed(output, error) => {
                 self.failed_count += 1;
-                self.results_map.insert(key, json!({ "status": "Failed", "output": output, "error": error }));
+                self.results_map.insert(
+                    key,
+                    json!({ "status": "Failed", "output": output, "error": error }),
+                );
             }
             ChildStatus::Skipped(output) => {
                 self.skipped_count += 1;
                 self.completed_count += 1;
-                self.results_map.insert(key, json!({ "status": "Skipped", "output": output }));
+                self.results_map
+                    .insert(key, json!({ "status": "Skipped", "output": output }));
             }
             ChildStatus::Running => {
                 self.running_count += 1;

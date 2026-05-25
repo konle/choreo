@@ -24,13 +24,19 @@ impl ApalisDispatcher {
 impl TaskDispatcher for ApalisDispatcher {
     async fn dispatch_task(&self, job: ExecuteTaskJob) -> anyhow::Result<()> {
         let mut storage = self.task_storage.clone();
-        storage.push(job).await.map_err(|e| anyhow::anyhow!("failed to push task: {}", e))?;
+        storage
+            .push(job)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to push task: {}", e))?;
         Ok(())
     }
 
     async fn dispatch_workflow(&self, job: ExecuteWorkflowJob) -> anyhow::Result<()> {
         let mut storage = self.workflow_storage.clone();
-        storage.push(job).await.map_err(|e| anyhow::anyhow!("failed to push workflow: {}", e))?;
+        storage
+            .push(job)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to push workflow: {}", e))?;
         Ok(())
     }
 }

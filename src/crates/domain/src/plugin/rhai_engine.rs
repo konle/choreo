@@ -1,4 +1,4 @@
-use rhai::{Engine, Scope, Dynamic, Array, Map, AST};
+use rhai::{AST, Array, Dynamic, Engine, Map, Scope};
 use serde_json::Value as JsonValue;
 
 const MAX_OPERATIONS: u64 = 100_000;
@@ -10,7 +10,9 @@ pub fn create_engine() -> Engine {
 }
 
 pub fn compile_script(engine: &Engine, script: &str) -> anyhow::Result<AST> {
-    engine.compile(script).map_err(|e| anyhow::anyhow!("Rhai compile error: {}", e))
+    engine
+        .compile(script)
+        .map_err(|e| anyhow::anyhow!("Rhai compile error: {}", e))
 }
 
 /// Inject a JSON value into the Rhai scope as variable `ctx`.
@@ -97,7 +99,8 @@ pub fn dynamic_to_json(val: &Dynamic) -> JsonValue {
 
 /// Convert a Rhai Map result to a serde_json Map.
 pub fn rhai_map_to_json(dynamic: Dynamic) -> anyhow::Result<serde_json::Map<String, JsonValue>> {
-    let rhai_map: Map = dynamic.try_cast()
+    let rhai_map: Map = dynamic
+        .try_cast()
         .ok_or_else(|| anyhow::anyhow!("script must return a Map (#{{ ... }})"))?;
     let mut result = serde_json::Map::new();
     for (k, v) in rhai_map {

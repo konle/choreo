@@ -1,11 +1,15 @@
-use chrono::Utc;
-use common::pagination::PaginatedData;
-use uuid::Uuid;
 use crate::shared::workflow::{TaskInstanceStatus, TaskStatus, TaskType};
 use crate::task::entity::query::TaskInstanceQuery;
-use crate::task::entity::task_definition::{TaskEntity, TaskInstanceEntity, TaskTemplate, TaskTransitionFields};
-use crate::task::repository::{TaskEntityRepository, TaskInstanceEntityRepository, RepositoryError};
+use crate::task::entity::task_definition::{
+    TaskEntity, TaskInstanceEntity, TaskTemplate, TaskTransitionFields,
+};
+use crate::task::repository::{
+    RepositoryError, TaskEntityRepository, TaskInstanceEntityRepository,
+};
+use chrono::Utc;
+use common::pagination::PaginatedData;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub struct CreateTaskCommand {
     pub name: String,
@@ -30,7 +34,9 @@ pub struct TaskService {
 
 impl TaskService {
     pub fn new(task_entity_repository: Arc<dyn TaskEntityRepository>) -> Self {
-        Self { task_entity_repository }
+        Self {
+            task_entity_repository,
+        }
     }
 
     pub async fn create_task(
@@ -81,24 +87,52 @@ impl TaskService {
         self.task_entity_repository.get_task_entity(id).await
     }
 
-    pub async fn get_task_entity_scoped(&self, tenant_id: &str, id: &str) -> Result<TaskEntity, RepositoryError> {
-        self.task_entity_repository.get_task_entity_scoped(tenant_id, id).await
+    pub async fn get_task_entity_scoped(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<TaskEntity, RepositoryError> {
+        self.task_entity_repository
+            .get_task_entity_scoped(tenant_id, id)
+            .await
     }
 
-    pub async fn list_task_entities(&self, tenant_id: &str) -> Result<Vec<TaskEntity>, RepositoryError> {
-        self.task_entity_repository.list_task_entities(tenant_id).await
+    pub async fn list_task_entities(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TaskEntity>, RepositoryError> {
+        self.task_entity_repository
+            .list_task_entities(tenant_id)
+            .await
     }
 
-    pub async fn list_task_entities_by_type(&self, tenant_id: &str, task_type: &str) -> Result<Vec<TaskEntity>, RepositoryError> {
-        self.task_entity_repository.list_task_entities_by_type(tenant_id, task_type).await
+    pub async fn list_task_entities_by_type(
+        &self,
+        tenant_id: &str,
+        task_type: &str,
+    ) -> Result<Vec<TaskEntity>, RepositoryError> {
+        self.task_entity_repository
+            .list_task_entities_by_type(tenant_id, task_type)
+            .await
     }
 
-    pub async fn update_task_entity(&self, task_entity: TaskEntity) -> Result<TaskEntity, RepositoryError> {
-        self.task_entity_repository.update_task_entity(task_entity).await
+    pub async fn update_task_entity(
+        &self,
+        task_entity: TaskEntity,
+    ) -> Result<TaskEntity, RepositoryError> {
+        self.task_entity_repository
+            .update_task_entity(task_entity)
+            .await
     }
 
-    pub async fn delete_task_entity(&self, tenant_id: &str, id: &str) -> Result<(), RepositoryError> {
-        self.task_entity_repository.delete_task_entity(tenant_id, id).await
+    pub async fn delete_task_entity(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<(), RepositoryError> {
+        self.task_entity_repository
+            .delete_task_entity(tenant_id, id)
+            .await
     }
 }
 
@@ -109,27 +143,55 @@ pub struct TaskInstanceService {
 
 impl TaskInstanceService {
     pub fn new(task_instance_entity_repository: Arc<dyn TaskInstanceEntityRepository>) -> Self {
-        Self { task_instance_entity_repository }
+        Self {
+            task_instance_entity_repository,
+        }
     }
 
-    pub async fn create_task_instance_entity(&self, task_instance_entity: TaskInstanceEntity) -> Result<TaskInstanceEntity, RepositoryError> {
-        self.task_instance_entity_repository.create_task_instance_entity(task_instance_entity).await
+    pub async fn create_task_instance_entity(
+        &self,
+        task_instance_entity: TaskInstanceEntity,
+    ) -> Result<TaskInstanceEntity, RepositoryError> {
+        self.task_instance_entity_repository
+            .create_task_instance_entity(task_instance_entity)
+            .await
     }
 
-    pub async fn get_task_instance_entity(&self, id: String) -> Result<TaskInstanceEntity, RepositoryError> {
-        self.task_instance_entity_repository.get_task_instance_entity(id).await
+    pub async fn get_task_instance_entity(
+        &self,
+        id: String,
+    ) -> Result<TaskInstanceEntity, RepositoryError> {
+        self.task_instance_entity_repository
+            .get_task_instance_entity(id)
+            .await
     }
 
-    pub async fn get_task_instance_entity_scoped(&self, tenant_id: &str, id: &str) -> Result<TaskInstanceEntity, RepositoryError> {
-        self.task_instance_entity_repository.get_task_instance_entity_scoped(tenant_id, id).await
+    pub async fn get_task_instance_entity_scoped(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<TaskInstanceEntity, RepositoryError> {
+        self.task_instance_entity_repository
+            .get_task_instance_entity_scoped(tenant_id, id)
+            .await
     }
 
-    pub async fn list_task_instance_entities(&self, query: &TaskInstanceQuery) -> Result<PaginatedData<TaskInstanceEntity>, RepositoryError> {
-        self.task_instance_entity_repository.list_task_instance_entities(query).await
+    pub async fn list_task_instance_entities(
+        &self,
+        query: &TaskInstanceQuery,
+    ) -> Result<PaginatedData<TaskInstanceEntity>, RepositoryError> {
+        self.task_instance_entity_repository
+            .list_task_instance_entities(query)
+            .await
     }
 
-    pub async fn update_task_instance_entity(&self, task_instance_entity: TaskInstanceEntity) -> Result<TaskInstanceEntity, RepositoryError> {
-        self.task_instance_entity_repository.update_task_instance_entity(task_instance_entity).await
+    pub async fn update_task_instance_entity(
+        &self,
+        task_instance_entity: TaskInstanceEntity,
+    ) -> Result<TaskInstanceEntity, RepositoryError> {
+        self.task_instance_entity_repository
+            .update_task_instance_entity(task_instance_entity)
+            .await
     }
 
     async fn transfer_status_with_fields(
@@ -140,10 +202,9 @@ impl TaskInstanceService {
         fields: TaskTransitionFields,
     ) -> Result<TaskInstanceEntity, RepositoryError> {
         if !from.can_transition_to(to) {
-            return Err(format!(
-                "invalid task instance state transition: {} -> {}",
-                from, to
-            ).into());
+            return Err(
+                format!("invalid task instance state transition: {} -> {}", from, to).into(),
+            );
         }
         self.task_instance_entity_repository
             .transfer_status_with_fields(task_instance_id, from, to, fields)
@@ -160,7 +221,8 @@ impl TaskInstanceService {
             &TaskInstanceStatus::Pending,
             &TaskInstanceStatus::Running,
             TaskTransitionFields::default(),
-        ).await
+        )
+        .await
     }
 
     /// Running -> Completed
@@ -173,7 +235,8 @@ impl TaskInstanceService {
             &TaskInstanceStatus::Running,
             &TaskInstanceStatus::Completed,
             TaskTransitionFields::default(),
-        ).await
+        )
+        .await
     }
 
     /// Running -> Failed
@@ -186,7 +249,8 @@ impl TaskInstanceService {
             &TaskInstanceStatus::Running,
             &TaskInstanceStatus::Failed,
             TaskTransitionFields::default(),
-        ).await
+        )
+        .await
     }
 
     /// Running -> Completed with output and input set atomically.
@@ -207,7 +271,8 @@ impl TaskInstanceService {
                 error_message: None,
                 execution_duration,
             },
-        ).await
+        )
+        .await
     }
 
     /// Running -> Failed with error_message set atomically.
@@ -227,7 +292,8 @@ impl TaskInstanceService {
                 error_message: Some(error_message),
                 execution_duration,
             },
-        ).await
+        )
+        .await
     }
 
     /// Failed -> Pending
@@ -240,7 +306,8 @@ impl TaskInstanceService {
             &TaskInstanceStatus::Failed,
             &TaskInstanceStatus::Pending,
             TaskTransitionFields::default(),
-        ).await
+        )
+        .await
     }
 
     /// Pending | Failed -> Canceled
@@ -248,13 +315,16 @@ impl TaskInstanceService {
         &self,
         task_instance_id: &str,
     ) -> Result<TaskInstanceEntity, RepositoryError> {
-        let instance = self.get_task_instance_entity(task_instance_id.to_string()).await?;
+        let instance = self
+            .get_task_instance_entity(task_instance_id.to_string())
+            .await?;
 
         if instance.task_status.is_terminal() {
             return Err(format!(
                 "cannot cancel task instance in terminal state: {}",
                 instance.task_status
-            ).into());
+            )
+            .into());
         }
 
         match instance.task_status {
@@ -264,12 +334,14 @@ impl TaskInstanceService {
                     &instance.task_status,
                     &TaskInstanceStatus::Canceled,
                     TaskTransitionFields::default(),
-                ).await
+                )
+                .await
             }
             other => Err(format!(
                 "cannot cancel task instance in state: {}, only Pending or Failed can be canceled",
                 other
-            ).into()),
+            )
+            .into()),
         }
     }
 }

@@ -1,9 +1,14 @@
+use crate::error::ApiError;
+use crate::middleware::auth::AuthContext;
+use crate::middleware::permission::require_permission;
+use crate::response::response::Response;
 use axum::{
+    Json, Router,
     extract::{Extension, Path, State},
     middleware::from_fn,
     routing::{delete, get, post, put},
-    Json, Router,
 };
+use chrono::Utc;
 use domain::shared::form::Form;
 use domain::shared::workflow::WorkflowStatus;
 use domain::user::entity::Permission;
@@ -11,11 +16,6 @@ use domain::workflow::{
     entity::workflow_definition::{WorkflowEntity, WorkflowMetaEntity, WorkflowNodeEntity},
     service::WorkflowDefinitionService,
 };
-use crate::error::ApiError;
-use crate::middleware::auth::AuthContext;
-use crate::middleware::permission::require_permission;
-use crate::response::response::Response;
-use chrono::Utc;
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -61,23 +61,44 @@ pub fn routes(handler: Arc<WorkflowHandler>) -> Router {
     let reads = Router::new()
         .route("/meta", get(list_workflow_meta))
         .route("/meta/{workflow_meta_id}", get(get_workflow_meta))
-        .route("/meta/{workflow_meta_id}/template", get(list_workflow_templates))
-        .route("/meta/{workflow_meta_id}/template/{version}", get(get_workflow_template));
+        .route(
+            "/meta/{workflow_meta_id}/template",
+            get(list_workflow_templates),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template/{version}",
+            get(get_workflow_template),
+        );
 
     let writes = Router::new()
         .route("/meta", post(create_workflow_meta))
-        .route("/meta/{workflow_meta_id}", put(update_workflow_meta).delete(delete_workflow_meta))
-        .route("/meta/{workflow_meta_id}/template", post(save_workflow_template))
-        .route("/meta/{workflow_meta_id}/template/{version}", delete(delete_workflow_template))
-        .route("/meta/{workflow_meta_id}/template/{version}/publish", post(publish_workflow_template))
-        .route("/meta/{workflow_meta_id}/template/{version}/copy", post(copy_workflow_template))
-        .route("/meta/{workflow_meta_id}/template/{version}/archive", post(archive_workflow_template))
+        .route(
+            "/meta/{workflow_meta_id}",
+            put(update_workflow_meta).delete(delete_workflow_meta),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template",
+            post(save_workflow_template),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template/{version}",
+            delete(delete_workflow_template),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template/{version}/publish",
+            post(publish_workflow_template),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template/{version}/copy",
+            post(copy_workflow_template),
+        )
+        .route(
+            "/meta/{workflow_meta_id}/template/{version}/archive",
+            post(archive_workflow_template),
+        )
         .layer(from_fn(require_permission(Permission::TemplateWrite)));
 
-    Router::new()
-        .merge(reads)
-        .merge(writes)
-        .with_state(handler)
+    Router::new().merge(reads).merge(writes).with_state(handler)
 }
 
 async fn create_workflow_meta(
@@ -105,7 +126,10 @@ async fn list_workflow_meta(
     State(handler): State<Arc<WorkflowHandler>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Response<Vec<WorkflowMetaEntity>>>, ApiError> {
-    let result = handler.service.list_workflow_meta_entities(&auth.tenant_id).await?;
+    let result = handler
+        .service
+        .list_workflow_meta_entities(&auth.tenant_id)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -114,7 +138,10 @@ async fn get_workflow_meta(
     Extension(auth): Extension<AuthContext>,
     Path(workflow_meta_id): Path<String>,
 ) -> Result<Json<Response<WorkflowMetaEntity>>, ApiError> {
-    let result = handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
+    let result = handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -124,7 +151,10 @@ async fn update_workflow_meta(
     Path(workflow_meta_id): Path<String>,
     Json(req): Json<UpdateWorkflowMetaRequest>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    let existing = handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
+    let existing = handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
     let entity = WorkflowMetaEntity {
         workflow_meta_id,
         tenant_id: auth.tenant_id,
@@ -145,7 +175,10 @@ async fn delete_workflow_meta(
     Extension(auth): Extension<AuthContext>,
     Path(workflow_meta_id): Path<String>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    handler.service.delete_workflow_meta_entity(&auth.tenant_id, &workflow_meta_id).await?;
+    handler
+        .service
+        .delete_workflow_meta_entity(&auth.tenant_id, &workflow_meta_id)
+        .await?;
     Ok(Json(Response::success(())))
 }
 
@@ -155,7 +188,10 @@ async fn save_workflow_template(
     Path(workflow_meta_id): Path<String>,
     Json(req): Json<SaveWorkflowTemplateRequest>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
+    handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
     let now = Utc::now();
     let entity = WorkflowEntity {
         workflow_meta_id,
@@ -176,8 +212,14 @@ async fn list_workflow_templates(
     Extension(auth): Extension<AuthContext>,
     Path(workflow_meta_id): Path<String>,
 ) -> Result<Json<Response<Vec<WorkflowEntity>>>, ApiError> {
-    handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
-    let result = handler.service.list_workflow_entities(&workflow_meta_id).await?;
+    handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
+    let result = handler
+        .service
+        .list_workflow_entities(&workflow_meta_id)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -186,8 +228,14 @@ async fn get_workflow_template(
     Extension(auth): Extension<AuthContext>,
     Path((workflow_meta_id, version)): Path<(String, u32)>,
 ) -> Result<Json<Response<WorkflowEntity>>, ApiError> {
-    handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
-    let result = handler.service.get_workflow_entity(workflow_meta_id, version).await?;
+    handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
+    let result = handler
+        .service
+        .get_workflow_entity(workflow_meta_id, version)
+        .await?;
     Ok(Json(Response::success(result)))
 }
 
@@ -196,8 +244,14 @@ async fn delete_workflow_template(
     Extension(auth): Extension<AuthContext>,
     Path((workflow_meta_id, version)): Path<(String, u32)>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
-    handler.service.delete_workflow_entity(workflow_meta_id, version).await?;
+    handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
+    handler
+        .service
+        .delete_workflow_entity(workflow_meta_id, version)
+        .await?;
     Ok(Json(Response::success(())))
 }
 
@@ -206,8 +260,14 @@ async fn publish_workflow_template(
     Extension(auth): Extension<AuthContext>,
     Path((workflow_meta_id, version)): Path<(String, u32)>,
 ) -> Result<Json<Response<()>>, ApiError> {
-    handler.service.get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id).await?;
-    handler.service.publish_workflow_entity(&workflow_meta_id, version).await?;
+    handler
+        .service
+        .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
+        .await?;
+    handler
+        .service
+        .publish_workflow_entity(&workflow_meta_id, version)
+        .await?;
     Ok(Json(Response::success(())))
 }
 
@@ -220,7 +280,10 @@ async fn copy_workflow_template(
         .service
         .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
         .await?;
-    handler.service.copy_workflow_entity(&workflow_meta_id, version).await?;
+    handler
+        .service
+        .copy_workflow_entity(&workflow_meta_id, version)
+        .await?;
     Ok(Json(Response::success(())))
 }
 
@@ -233,6 +296,9 @@ async fn archive_workflow_template(
         .service
         .get_workflow_meta_entity_scoped(&auth.tenant_id, &workflow_meta_id)
         .await?;
-    handler.service.archive_workflow_entity(&workflow_meta_id, version).await?;
+    handler
+        .service
+        .archive_workflow_entity(&workflow_meta_id, version)
+        .await?;
     Ok(Json(Response::success(())))
 }

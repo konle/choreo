@@ -1,15 +1,15 @@
 use axum::{
+    Json, Router,
     extract::{Extension, Path, State},
     routing::{get, post},
-    Json, Router,
 };
-use tracing::{info, error};
 use domain::approval::entity::{ApprovalInstanceEntity, Decision};
 use domain::approval::service::ApprovalService;
 use domain::plugin::plugins::approval::approval_status_to_node_status;
 use domain::shared::job::{ExecuteWorkflowJob, TaskDispatcher, WorkflowEvent};
 use serde::Deserialize;
 use std::sync::Arc;
+use tracing::{error, info};
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthContext;
@@ -24,7 +24,10 @@ pub struct ApprovalHandler {
 
 impl ApprovalHandler {
     pub fn new(service: ApprovalService, dispatcher: Arc<dyn TaskDispatcher>) -> Self {
-        Self { service, dispatcher }
+        Self {
+            service,
+            dispatcher,
+        }
     }
 }
 
@@ -81,7 +84,13 @@ async fn decide_approval(
 ) -> Result<Json<Response<ApprovalInstanceEntity>>, ApiError> {
     let approval = handler
         .service
-        .decide(&auth.tenant_id, &id, &auth.user_id, req.decision, req.comment)
+        .decide(
+            &auth.tenant_id,
+            &id,
+            &auth.user_id,
+            req.decision,
+            req.comment,
+        )
         .await?;
 
     info!(
@@ -105,7 +114,8 @@ async fn decide_approval(
             }).collect::<Vec<_>>(),
         });
 
-        let error_message = if approval.status == domain::approval::entity::ApprovalStatus::Rejected {
+        let error_message = if approval.status == domain::approval::entity::ApprovalStatus::Rejected
+        {
             Some("Approval rejected".to_string())
         } else {
             None
@@ -141,4 +151,3 @@ async fn decide_approval(
 
     Ok(Json(Response::success(approval)))
 }
-

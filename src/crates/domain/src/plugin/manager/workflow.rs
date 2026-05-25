@@ -7,14 +7,18 @@
 //!   optionally re-enter the loop.  
 //! - The loop reloads the instance from storage each iteration so concurrent updates are visible.
 
-use super::loop_action::LoopAction;
 use super::PluginManager;
+use super::loop_action::LoopAction;
 use crate::plugin::interface::{ExecutionResult, PluginExecutor};
 use crate::shared::job::{ExecuteWorkflowJob, WorkflowEvent};
 use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
 use crate::task::entity::task_definition::TaskTemplate;
-use crate::task::http_template_resolve::{resolved_http_request_snapshot, resolve_template_placeholders};
-use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+use crate::task::http_template_resolve::{
+    resolve_template_placeholders, resolved_http_request_snapshot,
+};
+use crate::workflow::entity::workflow_definition::{
+    NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+};
 use crate::workflow::resolution_context::augment_merged_context_with_nodes;
 use tracing::{debug, error, info, warn};
 
@@ -69,7 +73,10 @@ impl PluginManager {
 
         let result = match job.event {
             // 工作流启动执行事件是Start。async fn execute_instance(
-            WorkflowEvent::Start => self.on_workflow_start(&job.workflow_instance_id, &mut instance).await,
+            WorkflowEvent::Start => {
+                self.on_workflow_start(&job.workflow_instance_id, &mut instance)
+                    .await
+            }
             WorkflowEvent::NodeCallback {
                 node_id,
                 child_task_id,
@@ -91,10 +98,18 @@ impl PluginManager {
                 .await
             }
             WorkflowEvent::ChildRevived { node_id, child_id } => {
-                self.on_child_revived(&job.workflow_instance_id, &mut instance, &node_id, &child_id)
-                    .await
+                self.on_child_revived(
+                    &job.workflow_instance_id,
+                    &mut instance,
+                    &node_id,
+                    &child_id,
+                )
+                .await
             }
-            WorkflowEvent::RetryContainerChild { node_id, child_task_id } => {
+            WorkflowEvent::RetryContainerChild {
+                node_id,
+                child_task_id,
+            } => {
                 self.on_retry_container_child(
                     &job.workflow_instance_id,
                     &mut instance,
@@ -154,7 +169,9 @@ impl PluginManager {
         error_message: Option<String>,
         input: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
-        let ready = self.prepare_instance_for_node_callback(instance, &node_id).await?;
+        let ready = self
+            .prepare_instance_for_node_callback(instance, &node_id)
+            .await?;
         if let CallbackReadiness::Ignored = ready {
             return Ok(());
         }
@@ -210,7 +227,9 @@ impl PluginManager {
         };
 
         instance.nodes[node_index] = node;
-        let action = self.apply_exec_result(instance, node_index, exec_result).await?;
+        let action = self
+            .apply_exec_result(instance, node_index, exec_result)
+            .await?;
 
         match action {
             LoopAction::Advance | LoopAction::Retry => self.execute_workflow_loop(instance).await,
@@ -347,16 +366,16 @@ impl PluginManager {
         Ok(())
     }
 
-    fn rollback_child_in_container(
-        node: &mut WorkflowNodeInstanceEntity,
-        child_id: &str,
-    ) {
+    fn rollback_child_in_container(node: &mut WorkflowNodeInstanceEntity, child_id: &str) {
         let Some(ref mut state) = node.task_instance.output else {
             return;
         };
 
         // Remove from processed_callbacks
-        if let Some(arr) = state.get_mut("processed_callbacks").and_then(|v| v.as_array_mut()) {
+        if let Some(arr) = state
+            .get_mut("processed_callbacks")
+            .and_then(|v| v.as_array_mut())
+        {
             arr.retain(|v| v.as_str() != Some(child_id));
         }
 
@@ -398,9 +417,7 @@ impl PluginManager {
             .nodes
             .iter_mut()
             .find(|n| n.node_id == node_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("RetryContainerChild: node {} not found", node_id)
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("RetryContainerChild: node {} not found", node_id))?;
 
         Self::rollback_child_in_container(node, child_task_id);
 
@@ -411,7 +428,8 @@ impl PluginManager {
                     .iter_mut()
                     .find(|n| n.node_id == node_id)
                     .unwrap();
-                node.status = crate::workflow::entity::workflow_definition::NodeExecutionStatus::Pending;
+                node.status =
+                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Pending;
                 node.error_message = None;
 
                 let transition_result = instance
@@ -468,18 +486,21 @@ impl PluginManager {
         // Proactive check: if the child task already finished (extreme timing),
         // supplement the callback that may have been lost
         let child_result = match &self.task_instance_svc {
-            Some(svc) => svc.get_task_instance_entity(child_task_id.to_string()).await.ok(),
+            Some(svc) => svc
+                .get_task_instance_entity(child_task_id.to_string())
+                .await
+                .ok(),
             None => None,
         };
         if let Some(child) = child_result {
             use crate::shared::workflow::TaskInstanceStatus;
             let terminal_status = match child.task_status {
-                TaskInstanceStatus::Completed => Some(
-                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success,
-                ),
-                TaskInstanceStatus::Failed => Some(
-                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed,
-                ),
+                TaskInstanceStatus::Completed => {
+                    Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success)
+                }
+                TaskInstanceStatus::Failed => {
+                    Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed)
+                }
                 _ => None,
             };
 
@@ -745,11 +766,13 @@ impl PluginManager {
                         workflow_instance_id = %instance.workflow_instance_id,
                         "workflow completed"
                     );
-                    let old_status = self.workflow_instance_svc
+                    let old_status = self
+                        .workflow_instance_svc
                         .transition_instance(instance, WorkflowInstanceStatus::Completed)
                         .await
                         .map_err(|e| anyhow::anyhow!(e))?;
-                    self.dispatch_outbound_for_transition(instance, &old_status).await;
+                    self.dispatch_outbound_for_transition(instance, &old_status)
+                        .await;
                     Ok(LoopOutcome::Stop)
                 }
             }
@@ -759,15 +782,19 @@ impl PluginManager {
                     node_id = %current_node_id,
                     "workflow failed at node"
                 );
-                let old_status = self.workflow_instance_svc
+                let old_status = self
+                    .workflow_instance_svc
                     .transition_instance(instance, WorkflowInstanceStatus::Failed)
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
-                self.dispatch_outbound_for_transition(instance, &old_status).await;
+                self.dispatch_outbound_for_transition(instance, &old_status)
+                    .await;
                 Ok(LoopOutcome::Stop)
             }
             // 我们工作流只做编排，所以碰到这些状态则标识需要外部或者节点完成之后通知我们。因此我们直接返回stop。
-            NodeExecutionStatus::Suspended | NodeExecutionStatus::Await | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
+            NodeExecutionStatus::Suspended
+            | NodeExecutionStatus::Await
+            | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
             NodeExecutionStatus::Pending => {
                 instance.nodes[node_index].status = NodeExecutionStatus::Running;
                 self.save_instance_and_bump_epoch(instance).await?;
@@ -813,11 +840,8 @@ impl PluginManager {
             }
         }
 
-        node.context = augment_merged_context_with_nodes(
-            instance,
-            &node.node_id,
-            node.context.clone(),
-        );
+        node.context =
+            augment_merged_context_with_nodes(instance, &node.node_id, node.context.clone());
 
         match &node.task_instance.task_template {
             TaskTemplate::Http(tpl) => {
@@ -853,16 +877,18 @@ impl PluginManager {
             }
         };
 
-        self.apply_exec_result(instance, node_index, exec_result).await
+        self.apply_exec_result(instance, node_index, exec_result)
+            .await
     }
-
 }
 
 pub fn resolved_llm_request_snapshot(
     tpl: &crate::task::entity::task_definition::LlmTemplate,
     ctx: &serde_json::Value,
 ) -> serde_json::Value {
-    use crate::task::http_template_resolve::{resolve_form_to_json, resolve_template_placeholders, merge_ctx_with_task_form_layer};
+    use crate::task::http_template_resolve::{
+        merge_ctx_with_task_form_layer, resolve_form_to_json, resolve_template_placeholders,
+    };
 
     // Resolve form defaults against base ctx (Variable types get {{}} substituted),
     // then merge with REVERSED priority compared to HTTP:
@@ -878,7 +904,10 @@ pub fn resolved_llm_request_snapshot(
     let effective_ctx = if form_layer.is_empty() {
         ctx.clone()
     } else {
-        merge_ctx_with_task_form_layer(&serde_json::Value::Object(form_layer.clone()), &ctx.as_object().cloned().unwrap_or_default())
+        merge_ctx_with_task_form_layer(
+            &serde_json::Value::Object(form_layer.clone()),
+            &ctx.as_object().cloned().unwrap_or_default(),
+        )
     };
 
     let system_prompt = tpl
@@ -1090,8 +1119,8 @@ mod tests {
 
     #[test]
     fn test_stale_callback_guard_rejects_mismatched_node() {
-        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
         use crate::shared::workflow::WorkflowInstanceStatus;
+        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
 
         let instance = WorkflowInstanceEntity {
             workflow_instance_id: "wf-1".to_string(),
@@ -1122,8 +1151,8 @@ mod tests {
 
     #[test]
     fn test_stale_callback_guard_accepts_matching_node() {
-        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
         use crate::shared::workflow::WorkflowInstanceStatus;
+        use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
 
         let instance = WorkflowInstanceEntity {
             workflow_instance_id: "wf-1".to_string(),

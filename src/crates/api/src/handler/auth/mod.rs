@@ -1,17 +1,17 @@
+use crate::error::ApiError;
+use crate::middleware::auth::{AuthContext, Claims, create_token};
+use crate::response::response::Response;
 use axum::{
+    Json, Router,
     extract::{Extension, State},
     routing::{get, post},
-    Json, Router,
 };
+use domain::tenant::service::TenantService;
+use domain::user::entity::UserStatus;
+use domain::user::service::UserService;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn, error};
-use crate::error::ApiError;
-use crate::middleware::auth::{Claims, create_token, AuthContext};
-use crate::response::response::Response;
-use domain::user::service::UserService;
-use domain::user::entity::UserStatus;
-use domain::tenant::service::TenantService;
+use tracing::{error, info, warn};
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -47,7 +47,10 @@ pub struct AuthHandler {
 
 impl AuthHandler {
     pub fn new(user_service: UserService, tenant_service: TenantService) -> Self {
-        Self { user_service, tenant_service }
+        Self {
+            user_service,
+            tenant_service,
+        }
     }
 }
 
@@ -99,11 +102,10 @@ async fn login(
         return Err(ApiError::bad_request("User is disabled"));
     }
 
-    let valid = bcrypt::verify(&req.password, &user.password_hash)
-        .map_err(|e| {
-            error!(username = %req.username, error = %e, "bcrypt verification error");
-            ApiError::internal("Password verification failed")
-        })?;
+    let valid = bcrypt::verify(&req.password, &user.password_hash).map_err(|e| {
+        error!(username = %req.username, error = %e, "bcrypt verification error");
+        ApiError::internal("Password verification failed")
+    })?;
 
     if !valid {
         warn!(username = %req.username, "login failed: wrong password");
@@ -143,11 +145,10 @@ async fn login(
         exp,
     };
 
-    let token = create_token(&claims)
-        .map_err(|e| {
-            error!(username = %user.username, error = %e, "token creation failed");
-            ApiError::internal(format!("Token creation failed: {}", e))
-        })?;
+    let token = create_token(&claims).map_err(|e| {
+        error!(username = %user.username, error = %e, "token creation failed");
+        ApiError::internal(format!("Token creation failed: {}", e))
+    })?;
 
     info!(username = %user.username, user_id = %user.user_id, "login successful");
 
@@ -162,11 +163,10 @@ async fn register(
     State(handler): State<Arc<AuthHandler>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<Response<serde_json::Value>>, ApiError> {
-    let password_hash = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST)
-        .map_err(|e| {
-            error!(error = %e, "password hashing failed during register");
-            ApiError::internal(format!("Password hashing failed: {}", e))
-        })?;
+    let password_hash = bcrypt::hash(&req.password, bcrypt::DEFAULT_COST).map_err(|e| {
+        error!(error = %e, "password hashing failed during register");
+        ApiError::internal(format!("Password hashing failed: {}", e))
+    })?;
 
     let user = handler
         .user_service
@@ -192,25 +192,25 @@ async fn change_password(
         .await
         .map_err(|_| ApiError::bad_request("User not found"))?;
 
-    let valid = bcrypt::verify(&req.old_password, &user.password_hash)
-        .map_err(|e| {
-            error!(user_id = %ctx.user_id, error = %e, "bcrypt verification error");
-            ApiError::internal("Password verification failed")
-        })?;
+    let valid = bcrypt::verify(&req.old_password, &user.password_hash).map_err(|e| {
+        error!(user_id = %ctx.user_id, error = %e, "bcrypt verification error");
+        ApiError::internal("Password verification failed")
+    })?;
 
     if !valid {
         return Err(ApiError::bad_request("Old password is incorrect"));
     }
 
     if req.new_password.len() < 6 {
-        return Err(ApiError::bad_request("New password must be at least 6 characters"));
+        return Err(ApiError::bad_request(
+            "New password must be at least 6 characters",
+        ));
     }
 
-    let new_hash = bcrypt::hash(&req.new_password, bcrypt::DEFAULT_COST)
-        .map_err(|e| {
-            error!(error = %e, "password hashing failed");
-            ApiError::internal(format!("Password hashing failed: {}", e))
-        })?;
+    let new_hash = bcrypt::hash(&req.new_password, bcrypt::DEFAULT_COST).map_err(|e| {
+        error!(error = %e, "password hashing failed");
+        ApiError::internal(format!("Password hashing failed: {}", e))
+    })?;
 
     handler
         .user_service

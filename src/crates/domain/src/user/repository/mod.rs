@@ -1,5 +1,5 @@
+use crate::user::entity::{TenantRole, UserEntity, UserTenantRole};
 use async_trait::async_trait;
-use crate::user::entity::{UserEntity, UserTenantRole, TenantRole};
 
 pub type RepositoryError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -13,10 +13,24 @@ pub trait UserRepository: Send + Sync {
 
 #[async_trait]
 pub trait UserTenantRoleRepository: Send + Sync {
-    async fn assign_role(&self, user_id: &str, tenant_id: &str, role: &TenantRole) -> Result<UserTenantRole, RepositoryError>;
-    async fn get_role(&self, user_id: &str, tenant_id: &str) -> Result<UserTenantRole, RepositoryError>;
-    async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<UserTenantRole>, RepositoryError>;
+    async fn assign_role(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        role: &TenantRole,
+    ) -> Result<UserTenantRole, RepositoryError>;
+    async fn get_role(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+    ) -> Result<UserTenantRole, RepositoryError>;
+    async fn list_by_tenant(&self, tenant_id: &str)
+    -> Result<Vec<UserTenantRole>, RepositoryError>;
     async fn list_by_user(&self, user_id: &str) -> Result<Vec<UserTenantRole>, RepositoryError>;
     async fn remove_role(&self, user_id: &str, tenant_id: &str) -> Result<(), RepositoryError>;
-    async fn list_users_by_role(&self, tenant_id: &str, role: &str) -> Result<Vec<UserTenantRole>, RepositoryError>;
+    async fn list_users_by_role(
+        &self,
+        tenant_id: &str,
+        role: &str,
+    ) -> Result<Vec<UserTenantRole>, RepositoryError>;
 }

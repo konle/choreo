@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use crate::user::entity::{TenantRole, UserEntity, UserStatus, UserTenantRole};
+use crate::user::repository::{RepositoryError, UserRepository, UserTenantRoleRepository};
 use chrono::Utc;
+use std::sync::Arc;
 use uuid::Uuid;
-use crate::user::entity::{UserEntity, UserStatus, UserTenantRole, TenantRole};
-use crate::user::repository::{UserRepository, UserTenantRoleRepository, RepositoryError};
 
 #[derive(Clone)]
 pub struct UserService {
@@ -15,7 +15,10 @@ impl UserService {
         user_repo: Arc<dyn UserRepository>,
         role_repo: Arc<dyn UserTenantRoleRepository>,
     ) -> Self {
-        Self { user_repo, role_repo }
+        Self {
+            user_repo,
+            role_repo,
+        }
     }
 
     pub async fn create_user(
@@ -46,7 +49,10 @@ impl UserService {
         self.user_repo.get_by_id(user_id).await
     }
 
-    pub async fn get_user_by_username(&self, username: &str) -> Result<UserEntity, RepositoryError> {
+    pub async fn get_user_by_username(
+        &self,
+        username: &str,
+    ) -> Result<UserEntity, RepositoryError> {
         self.user_repo.get_by_username(username).await
     }
 
@@ -92,11 +98,7 @@ impl UserService {
         self.role_repo.list_by_user(user_id).await
     }
 
-    pub async fn remove_role(
-        &self,
-        user_id: &str,
-        tenant_id: &str,
-    ) -> Result<(), RepositoryError> {
+    pub async fn remove_role(&self, user_id: &str, tenant_id: &str) -> Result<(), RepositoryError> {
         self.role_repo.remove_role(user_id, tenant_id).await
     }
 }

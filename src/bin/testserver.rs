@@ -4,11 +4,11 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use rand::prelude::*;
+use rand::{Rng, rngs::ThreadRng};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{error, info};
-use rand::{Rng, rngs::ThreadRng};
-use rand::prelude::*;
 
 use workflow::config::AppConfig;
 

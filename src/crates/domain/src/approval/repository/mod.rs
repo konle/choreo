@@ -1,14 +1,24 @@
-use async_trait::async_trait;
 use crate::approval::entity::ApprovalInstanceEntity;
+use async_trait::async_trait;
 use std::error::Error;
 
 pub type RepositoryError = Box<dyn Error + Send + Sync>;
 
 #[async_trait]
 pub trait ApprovalRepository: Send + Sync {
-    async fn create(&self, entity: &ApprovalInstanceEntity) -> Result<ApprovalInstanceEntity, RepositoryError>;
-    async fn get_by_id(&self, tenant_id: &str, id: &str) -> Result<ApprovalInstanceEntity, RepositoryError>;
-    async fn update(&self, entity: &ApprovalInstanceEntity) -> Result<ApprovalInstanceEntity, RepositoryError>;
+    async fn create(
+        &self,
+        entity: &ApprovalInstanceEntity,
+    ) -> Result<ApprovalInstanceEntity, RepositoryError>;
+    async fn get_by_id(
+        &self,
+        tenant_id: &str,
+        id: &str,
+    ) -> Result<ApprovalInstanceEntity, RepositoryError>;
+    async fn update(
+        &self,
+        entity: &ApprovalInstanceEntity,
+    ) -> Result<ApprovalInstanceEntity, RepositoryError>;
 
     async fn find_by_workflow_and_node(
         &self,

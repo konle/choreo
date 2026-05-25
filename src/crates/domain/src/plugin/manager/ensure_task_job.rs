@@ -19,7 +19,11 @@ impl PluginManager {
     fn derive_child_template(
         parent: &TaskInstanceEntity,
         job: &ExecuteTaskJob,
-    ) -> anyhow::Result<(TaskTemplate, crate::shared::workflow::TaskType, Option<String>)> {
+    ) -> anyhow::Result<(
+        TaskTemplate,
+        crate::shared::workflow::TaskType,
+        Option<String>,
+    )> {
         match &parent.task_template {
             TaskTemplate::Parallel(_pt) => {
                 let inner = (*_pt.task_template).clone();
@@ -32,7 +36,9 @@ impl PluginManager {
                     .as_ref()
                     .and_then(|c| c.item_index)
                     .ok_or_else(|| {
-                        anyhow::anyhow!("ForkJoin dispatch job missing item_index in caller_context")
+                        anyhow::anyhow!(
+                            "ForkJoin dispatch job missing item_index in caller_context"
+                        )
                     })?;
                 let item = fj.tasks.get(idx).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -117,58 +123,60 @@ impl PluginManager {
         task_instance.task_status = TaskInstanceStatus::Pending;
 
         match &task_instance.task_template {
-            TaskTemplate::Http(tpl) => {
-                match &parent.task_template {
-                    TaskTemplate::Parallel(pt) => {
-                        let idx = job
-                            .caller_context
-                            .as_ref()
-                            .and_then(|c| c.item_index)
-                            .unwrap_or(0);
-                        let ctx = crate::task::http_template_resolve::context_with_parallel_item(
+            TaskTemplate::Http(tpl) => match &parent.task_template {
+                TaskTemplate::Parallel(pt) => {
+                    let idx = job
+                        .caller_context
+                        .as_ref()
+                        .and_then(|c| c.item_index)
+                        .unwrap_or(0);
+                    let ctx = crate::task::http_template_resolve::context_with_parallel_item(
+                        parent_node_ctx,
+                        &pt.items_path,
+                        &pt.item_alias,
+                        idx,
+                    );
+                    task_instance.input = Some(
+                        crate::task::http_template_resolve::resolved_http_request_snapshot(
+                            tpl, &ctx,
+                        ),
+                    );
+                }
+                TaskTemplate::ForkJoin(_) => {
+                    task_instance.input = Some(
+                        crate::task::http_template_resolve::resolved_http_request_snapshot(
+                            tpl,
                             parent_node_ctx,
-                            &pt.items_path,
-                            &pt.item_alias,
-                            idx,
-                        );
-                        task_instance.input = Some(
-                            crate::task::http_template_resolve::resolved_http_request_snapshot(tpl, &ctx),
-                        );
-                    }
-                    TaskTemplate::ForkJoin(_) => {
-                        task_instance.input = Some(
+                        ),
+                    );
+                }
+                TaskTemplate::Http(_) => {
+                    let has_resolved_url = parent
+                        .input
+                        .as_ref()
+                        .and_then(|i| i.get("url"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    task_instance.input = if has_resolved_url {
+                        parent.input.clone()
+                    } else {
+                        Some(
                             crate::task::http_template_resolve::resolved_http_request_snapshot(
                                 tpl,
                                 parent_node_ctx,
                             ),
-                        );
-                    }
-                    TaskTemplate::Http(_) => {
-                        let has_resolved_url = parent
-                            .input
-                            .as_ref()
-                            .and_then(|i| i.get("url"))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|s| !s.is_empty());
-                        task_instance.input = if has_resolved_url {
-                            parent.input.clone()
-                        } else {
-                            Some(
-                                crate::task::http_template_resolve::resolved_http_request_snapshot(
-                                    tpl, parent_node_ctx,
-                                ),
-                            )
-                        };
-                    }
-                    _ => {
-                        task_instance.input = Some(
-                            crate::task::http_template_resolve::resolved_http_request_snapshot(
-                                tpl, parent_node_ctx,
-                            ),
-                        );
-                    }
+                        )
+                    };
                 }
-            }
+                _ => {
+                    task_instance.input = Some(
+                        crate::task::http_template_resolve::resolved_http_request_snapshot(
+                            tpl,
+                            parent_node_ctx,
+                        ),
+                    );
+                }
+            },
             TaskTemplate::Llm(tpl) => {
                 let ctx = match &parent.task_template {
                     TaskTemplate::Parallel(pt) => {
@@ -195,7 +203,8 @@ impl PluginManager {
                     _ => parent_node_ctx.clone(),
                 };
                 if task_instance.input.is_none() {
-                    task_instance.input = Some(super::workflow::resolved_llm_request_snapshot(tpl, &ctx));
+                    task_instance.input =
+                        Some(super::workflow::resolved_llm_request_snapshot(tpl, &ctx));
                 }
             }
             _ => {}

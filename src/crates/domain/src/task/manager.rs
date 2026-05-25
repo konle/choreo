@@ -1,10 +1,10 @@
+use crate::shared::workflow::TaskType;
+use crate::task::entity::task_definition::TaskInstanceEntity;
+use crate::task::interface::{TaskExecutionResult, TaskExecutor};
+use crate::task::service::TaskInstanceService;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, error};
-use crate::shared::workflow::TaskType;
-use crate::task::interface::{TaskExecutionResult, TaskExecutor};
-use crate::task::entity::task_definition::TaskInstanceEntity;
-use crate::task::service::TaskInstanceService;
+use tracing::{error, info};
 
 pub struct TaskManager {
     executors: HashMap<TaskType, Box<dyn TaskExecutor>>,

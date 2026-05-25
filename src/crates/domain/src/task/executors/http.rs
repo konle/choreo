@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use rhai::Scope;
 use reqwest::Client;
+use rhai::Scope;
 use serde_json::json;
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
 use crate::plugin::rhai_engine;
 use crate::shared::workflow::TaskType;
@@ -70,7 +70,11 @@ impl HttpTaskExecutor {
         let body = resp.text().await.unwrap_or_default();
         let duration_ms = (Utc::now() - start).num_milliseconds().max(0) as u64;
 
-        Ok(HttpResponse { status_code, body, duration_ms })
+        Ok(HttpResponse {
+            status_code,
+            body,
+            duration_ms,
+        })
     }
 
     fn evaluate_success_condition(
@@ -158,7 +162,10 @@ impl TaskExecutor for HttpTaskExecutor {
         let tid = task_instance.task_instance_id.as_str();
 
         for attempt in 0..attempts {
-            let resp = match self.send_request(&url, &method, &headers_obj, &body_json, config.timeout).await {
+            let resp = match self
+                .send_request(&url, &method, &headers_obj, &body_json, config.timeout)
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(task_instance_id = %tid, url = %url, attempt = attempt + 1, error = %e, "HTTP request failed");
@@ -178,7 +185,13 @@ impl TaskExecutor for HttpTaskExecutor {
                 last_error = Some(format!("HTTP {}: {}", resp.status_code, resp.body));
             } else if let Some(ref condition) = config.success_condition {
                 let passed = self.evaluate_success_condition(tid, &resp.body, condition);
-                let output = Self::build_response_output(resp.status_code, &resp.body, resp.duration_ms, attempt, Some((condition, passed)));
+                let output = Self::build_response_output(
+                    resp.status_code,
+                    &resp.body,
+                    resp.duration_ms,
+                    attempt,
+                    Some((condition, passed)),
+                );
 
                 if passed {
                     debug!(task_instance_id = %tid, url = %url, status_code = resp.status_code, condition = %condition, duration_ms = resp.duration_ms, "HTTP request succeeded (condition met)");
@@ -191,11 +204,20 @@ impl TaskExecutor for HttpTaskExecutor {
                 }
 
                 warn!(task_instance_id = %tid, url = %url, condition = %condition, attempt = attempt + 1, "success_condition not met");
-                last_error = Some(format!("success_condition `{}` not met (body: {})", condition, resp.body));
+                last_error = Some(format!(
+                    "success_condition `{}` not met (body: {})",
+                    condition, resp.body
+                ));
                 last_output = Some(output);
             } else {
                 debug!(task_instance_id = %tid, url = %url, status_code = resp.status_code, duration_ms = resp.duration_ms, "HTTP request succeeded");
-                let output = Self::build_response_output(resp.status_code, &resp.body, resp.duration_ms, attempt, None);
+                let output = Self::build_response_output(
+                    resp.status_code,
+                    &resp.body,
+                    resp.duration_ms,
+                    attempt,
+                    None,
+                );
                 return Ok(TaskExecutionResult {
                     status: NodeExecutionStatus::Success,
                     input: Some(input_snapshot),

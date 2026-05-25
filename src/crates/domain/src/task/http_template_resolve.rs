@@ -12,7 +12,7 @@
 
 use crate::shared::form::{Form, FormValue, FormValueType};
 use crate::task::entity::task_definition::{HttpMethod, TaskHttpTemplate};
-use serde_json::{json, Map, Value as JsonValue};
+use serde_json::{Map, Value as JsonValue, json};
 
 pub fn get_by_path_pub(ctx: &JsonValue, path: &str) -> Option<JsonValue> {
     get_by_path(ctx, path)
@@ -65,19 +65,21 @@ pub fn resolve_template_placeholders(s: &str, ctx: &JsonValue) -> String {
 pub fn resolve_form_to_json(form: &Form, ctx: &JsonValue) -> JsonValue {
     match form.value_type {
         FormValueType::Variable => match &form.value {
-            FormValue::String(s) => {
-                JsonValue::String(resolve_template_placeholders(s, ctx))
-            }
+            FormValue::String(s) => JsonValue::String(resolve_template_placeholders(s, ctx)),
             _ => JsonValue::Null,
         },
         FormValueType::String => match &form.value {
             FormValue::String(s) => JsonValue::String(s.clone()),
-            FormValue::Number(n) => JsonValue::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into())),
+            FormValue::Number(n) => {
+                JsonValue::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into()))
+            }
             FormValue::Bool(b) => JsonValue::Bool(*b),
             FormValue::Json(j) => j.clone(),
         },
         FormValueType::Number => match &form.value {
-            FormValue::Number(n) => JsonValue::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into())),
+            FormValue::Number(n) => {
+                JsonValue::Number(serde_json::Number::from_f64(*n).unwrap_or(0.into()))
+            }
             FormValue::String(s) => {
                 if let Ok(n) = s.parse::<f64>() {
                     JsonValue::Number(serde_json::Number::from_f64(n).unwrap_or(0.into()))
@@ -101,7 +103,10 @@ pub fn resolve_form_to_json(form: &Form, ctx: &JsonValue) -> JsonValue {
 }
 
 /// `base` object extended with `layer` entries; **layer overwrites** existing keys (task `form` wins).
-pub fn merge_ctx_with_task_form_layer(base: &JsonValue, layer: &Map<String, JsonValue>) -> JsonValue {
+pub fn merge_ctx_with_task_form_layer(
+    base: &JsonValue,
+    layer: &Map<String, JsonValue>,
+) -> JsonValue {
     if layer.is_empty() {
         return base.clone();
     }
@@ -174,10 +179,7 @@ pub fn context_with_parallel_item(
     item_index: usize,
 ) -> JsonValue {
     let ptr = items_json_pointer(items_path);
-    let mut base_map = instance_context
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let mut base_map = instance_context.as_object().cloned().unwrap_or_default();
 
     if let Some(JsonValue::Array(arr)) = instance_context.pointer(&ptr) {
         if let Some(item) = arr.get(item_index) {
@@ -203,7 +205,13 @@ pub fn effective_http_request(
     task_instance: &crate::task::entity::task_definition::TaskInstanceEntity,
     config: &TaskHttpTemplate,
     fallback_ctx: &JsonValue,
-) -> (JsonValue, String, HttpMethod, serde_json::Map<String, JsonValue>, Option<JsonValue>) {
+) -> (
+    JsonValue,
+    String,
+    HttpMethod,
+    serde_json::Map<String, JsonValue>,
+    Option<JsonValue>,
+) {
     let snapshot = if let Some(inp) = &task_instance.input {
         if inp
             .get("url")
@@ -378,7 +386,11 @@ mod tests {
         }
     }
 
-    fn llm_tpl_with_form_and_url(base_url: &str, user_prompt: &str, form: Vec<Form>) -> LlmTemplate {
+    fn llm_tpl_with_form_and_url(
+        base_url: &str,
+        user_prompt: &str,
+        form: Vec<Form>,
+    ) -> LlmTemplate {
         LlmTemplate {
             base_url: base_url.to_string(),
             model: "test-model".to_string(),
@@ -400,23 +412,40 @@ mod tests {
         let tpl = llm_tpl_with_form(
             "Translate from {{source_lang}} to {{target_lang}}: {{text}}",
             vec![
-                form("source_lang", FormValue::String("中文".into()), FormValueType::String),
-                form("target_lang", FormValue::String("英文".into()), FormValueType::String),
-                form("text", FormValue::String("你好".into()), FormValueType::String),
+                form(
+                    "source_lang",
+                    FormValue::String("中文".into()),
+                    FormValueType::String,
+                ),
+                form(
+                    "target_lang",
+                    FormValue::String("英文".into()),
+                    FormValueType::String,
+                ),
+                form(
+                    "text",
+                    FormValue::String("你好".into()),
+                    FormValueType::String,
+                ),
             ],
         );
         let ctx = json!({ "AI_GATEWAY": "192.168.1.1:11434" });
         let snap = resolved_llm_request_snapshot(&tpl, &ctx);
-        assert_eq!(snap["user_prompt"], json!("Translate from 中文 to 英文: 你好"));
+        assert_eq!(
+            snap["user_prompt"],
+            json!("Translate from 中文 to 英文: 你好")
+        );
     }
 
     #[test]
     fn llm_ctx_overrides_form_defaults() {
         let tpl = llm_tpl_with_form(
             "Translate: {{text}}",
-            vec![
-                form("text", FormValue::String("默认文本".into()), FormValueType::String),
-            ],
+            vec![form(
+                "text",
+                FormValue::String("默认文本".into()),
+                FormValueType::String,
+            )],
         );
         let ctx = json!({ "text": "用户实际输入" });
         let snap = resolved_llm_request_snapshot(&tpl, &ctx);
@@ -429,9 +458,11 @@ mod tests {
     fn llm_form_variable_type_resolves_against_base_ctx() {
         let tpl = llm_tpl_with_form(
             "{{greeting}}",
-            vec![
-                form("greeting", FormValue::String("Hello {{name}}".into()), FormValueType::Variable),
-            ],
+            vec![form(
+                "greeting",
+                FormValue::String("Hello {{name}}".into()),
+                FormValueType::Variable,
+            )],
         );
         let ctx = json!({ "name": "World" });
         let snap = resolved_llm_request_snapshot(&tpl, &ctx);
@@ -445,9 +476,11 @@ mod tests {
     fn llm_form_variable_references_ctx_then_used_in_prompt() {
         let tpl = llm_tpl_with_form(
             "请翻译: {{text}}",
-            vec![
-                form("text", FormValue::String("{{text2}}".into()), FormValueType::Variable),
-            ],
+            vec![form(
+                "text",
+                FormValue::String("{{text2}}".into()),
+                FormValueType::Variable,
+            )],
         );
         let ctx = json!({ "text2": "你是美国人吗?" });
         let snap = resolved_llm_request_snapshot(&tpl, &ctx);
@@ -475,14 +508,29 @@ mod tests {
             "http://{{AI_GATEWAY}}/v1",
             "请将下列文本从{{source_lang}}翻译为{{target_lang}}: {{text}}",
             vec![
-                form("source_lang", FormValue::String("中文".into()), FormValueType::String),
-                form("target_lang", FormValue::String("日文".into()), FormValueType::String),
-                form("text", FormValue::String("{{text2}}".into()), FormValueType::Variable),
+                form(
+                    "source_lang",
+                    FormValue::String("中文".into()),
+                    FormValueType::String,
+                ),
+                form(
+                    "target_lang",
+                    FormValue::String("日文".into()),
+                    FormValueType::String,
+                ),
+                form(
+                    "text",
+                    FormValue::String("{{text2}}".into()),
+                    FormValueType::Variable,
+                ),
             ],
         );
         let ctx = json!({ "AI_GATEWAY": "192.168.50.18:11434", "text2": "你是美国人吗?" });
         let snap = resolved_llm_request_snapshot(&tpl, &ctx);
-        assert_eq!(snap["user_prompt"], json!("请将下列文本从中文翻译为日文: 你是美国人吗?"));
+        assert_eq!(
+            snap["user_prompt"],
+            json!("请将下列文本从中文翻译为日文: 你是美国人吗?")
+        );
         assert_eq!(snap["base_url"], json!("http://192.168.50.18:11434/v1"));
     }
 }

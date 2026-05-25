@@ -4,7 +4,7 @@
 //! so templates and Rhai see `nodes.<node_id>.output` for completed or skipped nodes.
 
 use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity};
-use serde_json::{json, Map, Value as JsonValue};
+use serde_json::{Map, Value as JsonValue, json};
 
 /// Build the `nodes` object: only **other** nodes (not `current_node_id`) that are
 /// `Success` or **`Skipped` with persisted `task_instance.output`** (including `{}`).
@@ -128,11 +128,7 @@ mod tests {
             entry_node: "a".into(),
             current_node: "c".into(),
             nodes: vec![
-                node(
-                    "a",
-                    NodeExecutionStatus::Success,
-                    Some(json!({"x": 1})),
-                ),
+                node("a", NodeExecutionStatus::Success, Some(json!({"x": 1}))),
                 node("b", NodeExecutionStatus::Failed, Some(json!({"y": 2}))),
                 node("c", NodeExecutionStatus::Running, None),
             ],
@@ -166,11 +162,7 @@ mod tests {
             context: JsonValue::Object(Map::new()),
             entry_node: "a".into(),
             current_node: "b".into(),
-            nodes: vec![node(
-                "a",
-                NodeExecutionStatus::Skipped,
-                Some(json!({})),
-            )],
+            nodes: vec![node("a", NodeExecutionStatus::Skipped, Some(json!({})))],
             epoch: 0,
             locked_by: None,
             locked_duration: None,
@@ -183,7 +175,6 @@ mod tests {
         let nodes = build_nodes_object(&instance, "b");
         assert_eq!(nodes["a"]["output"], json!({}));
     }
-
 
     #[test]
     fn augment_overwrites_nodes_key() {
@@ -199,11 +190,7 @@ mod tests {
             context: JsonValue::Object(Map::new()),
             entry_node: "a".into(),
             current_node: "b".into(),
-            nodes: vec![node(
-                "a",
-                NodeExecutionStatus::Success,
-                Some(json!("done")),
-            )],
+            nodes: vec![node("a", NodeExecutionStatus::Success, Some(json!("done")))],
             epoch: 0,
             locked_by: None,
             locked_duration: None,

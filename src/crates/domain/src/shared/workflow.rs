@@ -23,8 +23,8 @@ impl WorkflowStatus {
         matches!(
             (self, target),
             (WorkflowStatus::Draft, WorkflowStatus::Published)
-            | (WorkflowStatus::Published, WorkflowStatus::Archived)
-            | (WorkflowStatus::Archived, WorkflowStatus::Deleted)
+                | (WorkflowStatus::Published, WorkflowStatus::Archived)
+                | (WorkflowStatus::Archived, WorkflowStatus::Deleted)
         )
     }
 }
@@ -58,22 +58,48 @@ impl WorkflowInstanceStatus {
     pub fn can_transition_to(&self, target: &WorkflowInstanceStatus) -> bool {
         matches!(
             (self, target),
-            (WorkflowInstanceStatus::Pending, WorkflowInstanceStatus::Running)
-                | (WorkflowInstanceStatus::Running, WorkflowInstanceStatus::Completed)
-                | (WorkflowInstanceStatus::Running, WorkflowInstanceStatus::Failed)
-                | (WorkflowInstanceStatus::Running, WorkflowInstanceStatus::Suspended)
-                | (WorkflowInstanceStatus::Running, WorkflowInstanceStatus::Await)
-                | (WorkflowInstanceStatus::Failed, WorkflowInstanceStatus::Pending)
-                | (WorkflowInstanceStatus::Failed, WorkflowInstanceStatus::Canceled)
-                | (WorkflowInstanceStatus::Failed, WorkflowInstanceStatus::Await)
-                | (WorkflowInstanceStatus::Suspended, WorkflowInstanceStatus::Pending)
-                | (WorkflowInstanceStatus::Suspended, WorkflowInstanceStatus::Canceled)
-                | (WorkflowInstanceStatus::Await, WorkflowInstanceStatus::Pending)
+            (
+                WorkflowInstanceStatus::Pending,
+                WorkflowInstanceStatus::Running
+            ) | (
+                WorkflowInstanceStatus::Running,
+                WorkflowInstanceStatus::Completed
+            ) | (
+                WorkflowInstanceStatus::Running,
+                WorkflowInstanceStatus::Failed
+            ) | (
+                WorkflowInstanceStatus::Running,
+                WorkflowInstanceStatus::Suspended
+            ) | (
+                WorkflowInstanceStatus::Running,
+                WorkflowInstanceStatus::Await
+            ) | (
+                WorkflowInstanceStatus::Failed,
+                WorkflowInstanceStatus::Pending
+            ) | (
+                WorkflowInstanceStatus::Failed,
+                WorkflowInstanceStatus::Canceled
+            ) | (
+                WorkflowInstanceStatus::Failed,
+                WorkflowInstanceStatus::Await
+            ) | (
+                WorkflowInstanceStatus::Suspended,
+                WorkflowInstanceStatus::Pending
+            ) | (
+                WorkflowInstanceStatus::Suspended,
+                WorkflowInstanceStatus::Canceled
+            ) | (
+                WorkflowInstanceStatus::Await,
+                WorkflowInstanceStatus::Pending
+            )
         )
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Canceled)
+        matches!(
+            self,
+            WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Canceled
+        )
     }
 }
 
@@ -88,7 +114,6 @@ impl Display for TaskStatus {
         write!(f, "{:?}", self)
     }
 }
-
 
 // 任务实例状态枚举 用于表示任务实例的状态 如待执行、执行中、已完成、失败
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +152,12 @@ impl TaskInstanceStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskInstanceStatus::Completed | TaskInstanceStatus::Canceled | TaskInstanceStatus::Skipped)
+        matches!(
+            self,
+            TaskInstanceStatus::Completed
+                | TaskInstanceStatus::Canceled
+                | TaskInstanceStatus::Skipped
+        )
     }
 }
 // 任务类型枚举 用于表示任务的类型 如http、grpc、审批等
@@ -161,11 +191,15 @@ mod tests {
 
     #[test]
     fn completed_to_await_forbidden() {
-        assert!(!WorkflowInstanceStatus::Completed.can_transition_to(&WorkflowInstanceStatus::Await));
+        assert!(
+            !WorkflowInstanceStatus::Completed.can_transition_to(&WorkflowInstanceStatus::Await)
+        );
     }
 
     #[test]
     fn suspended_to_await_forbidden() {
-        assert!(!WorkflowInstanceStatus::Suspended.can_transition_to(&WorkflowInstanceStatus::Await));
+        assert!(
+            !WorkflowInstanceStatus::Suspended.can_transition_to(&WorkflowInstanceStatus::Await)
+        );
     }
 }

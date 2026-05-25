@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::tenant::entity::TenantEntity;
+use async_trait::async_trait;
 
 pub type RepositoryError = Box<dyn std::error::Error + Send + Sync>;
 

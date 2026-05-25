@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use serde_json::{Value as JsonValue, json};
 use tracing::{debug, error};
 
-use crate::plugin::interface::{ChildStatus, ContainerGatherResult, ExecutionResult, PluginExecutor, PluginInterface, should_abort};
+use crate::plugin::interface::{
+    ChildStatus, ContainerGatherResult, ExecutionResult, PluginExecutor, PluginInterface,
+    should_abort,
+};
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowCallerContext};
 use crate::task::entity::task_definition::{ParallelMode, TaskTemplate};
 use crate::workflow::entity::workflow_definition::{
@@ -66,9 +69,7 @@ impl ForkJoinPlugin {
         for (index, item) in template.tasks.iter().enumerate() {
             let child_task_id = format!(
                 "{}-{}-{}",
-                workflow_instance.workflow_instance_id,
-                node_instance.node_id,
-                index as u64
+                workflow_instance.workflow_instance_id, node_instance.node_id, index as u64
             );
 
             let child_task_status = executor
@@ -107,9 +108,7 @@ impl ForkJoinPlugin {
             }
             let child_id = format!(
                 "{}-{}-{}",
-                workflow_instance.workflow_instance_id,
-                node_instance.node_id,
-                index
+                workflow_instance.workflow_instance_id, node_instance.node_id, index
             );
             let child_status = executor
                 .resolve_child_status(&child_id, &template.tasks[index].task_template)
@@ -133,9 +132,7 @@ impl ForkJoinPlugin {
         for &index in indices {
             let child_id = format!(
                 "{}-{}-{}",
-                workflow_instance.workflow_instance_id,
-                node_instance.node_id,
-                index
+                workflow_instance.workflow_instance_id, node_instance.node_id, index
             );
             let caller_context = WorkflowCallerContext {
                 workflow_instance_id: workflow_instance.workflow_instance_id.clone(),
@@ -206,9 +203,9 @@ impl PluginInterface for ForkJoinPlugin {
         }
 
         let total_tasks = template.tasks.len() as u64;
-        let gather = Self::gather_child_task_status(
-            executor, &template, node_instance, workflow_instance,
-        ).await?;
+        let gather =
+            Self::gather_child_task_status(executor, &template, node_instance, workflow_instance)
+                .await?;
 
         match Self::diagnose(total_tasks, template.max_failures, &gather) {
             ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
@@ -242,9 +239,14 @@ impl PluginInterface for ForkJoinPlugin {
                     .unwrap_or(0);
 
                 let indices = Self::calc_dispatch_indices(
-                    executor, &template, workflow_instance, node_instance,
-                    dispatched_count, &gather,
-                ).await;
+                    executor,
+                    &template,
+                    workflow_instance,
+                    node_instance,
+                    dispatched_count,
+                    &gather,
+                )
+                .await;
 
                 node_instance.task_instance.input = Some(json!({
                     "task_keys": template.tasks.iter().map(|t| t.task_key.clone()).collect::<Vec<_>>(),
@@ -254,15 +256,26 @@ impl PluginInterface for ForkJoinPlugin {
                 }));
 
                 let (dispatch_jobs, dispatch_workflow_jobs) = Self::build_dispatch_jobs(
-                    &template, workflow_instance, node_instance, &indices,
+                    &template,
+                    workflow_instance,
+                    node_instance,
+                    &indices,
                 );
 
                 let new_dispatched = std::cmp::max(
                     dispatched_count,
-                    indices.last().map(|&i| i as u64 + 1).unwrap_or(dispatched_count),
+                    indices
+                        .last()
+                        .map(|&i| i as u64 + 1)
+                        .unwrap_or(dispatched_count),
                 );
 
-                Self::write_output(node_instance, total_tasks, new_dispatched, gather.results_map);
+                Self::write_output(
+                    node_instance,
+                    total_tasks,
+                    new_dispatched,
+                    gather.results_map,
+                );
 
                 Ok(ExecutionResult {
                     status: NodeExecutionStatus::Await,
@@ -293,14 +306,14 @@ impl PluginInterface for ForkJoinPlugin {
             }
         };
 
-if template.tasks.is_empty() {
+        if template.tasks.is_empty() {
             return Ok(ExecutionResult::success(None));
         }
 
         let total_tasks = template.tasks.len() as u64;
-        let gather = Self::gather_child_task_status(
-            executor, &template, node_instance, workflow_instance,
-        ).await?;
+        let gather =
+            Self::gather_child_task_status(executor, &template, node_instance, workflow_instance)
+                .await?;
 
         match Self::diagnose(total_tasks, template.max_failures, &gather) {
             ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
@@ -334,20 +347,36 @@ if template.tasks.is_empty() {
                     .unwrap_or(0);
 
                 let indices = Self::calc_dispatch_indices(
-                    executor, &template, workflow_instance, node_instance,
-                    dispatched_count, &gather,
-                ).await;
+                    executor,
+                    &template,
+                    workflow_instance,
+                    node_instance,
+                    dispatched_count,
+                    &gather,
+                )
+                .await;
 
                 let (dispatch_jobs, dispatch_workflow_jobs) = Self::build_dispatch_jobs(
-                    &template, workflow_instance, node_instance, &indices,
+                    &template,
+                    workflow_instance,
+                    node_instance,
+                    &indices,
                 );
 
                 let new_dispatched = std::cmp::max(
                     dispatched_count,
-                    indices.last().map(|&i| i as u64 + 1).unwrap_or(dispatched_count),
+                    indices
+                        .last()
+                        .map(|&i| i as u64 + 1)
+                        .unwrap_or(dispatched_count),
                 );
 
-                Self::write_output(node_instance, total_tasks, new_dispatched, gather.results_map);
+                Self::write_output(
+                    node_instance,
+                    total_tasks,
+                    new_dispatched,
+                    gather.results_map,
+                );
 
                 Ok(ExecutionResult {
                     status: NodeExecutionStatus::Await,
@@ -511,10 +540,7 @@ mod tests {
             child_statuses: std::collections::HashMap::new(),
         };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
         assert_eq!(result.dispatch_jobs.len(), 3);
@@ -528,14 +554,19 @@ mod tests {
         let mut wf = make_instance();
 
         let mut statuses = std::collections::HashMap::new();
-        statuses.insert("wf1-fj-0".into(), ChildStatus::Completed(Some(json!({"result": 1}))));
-        statuses.insert("wf1-fj-1".into(), ChildStatus::Completed(Some(json!({"result": 2}))));
-        let exec = StubExecutor { child_statuses: statuses };
+        statuses.insert(
+            "wf1-fj-0".into(),
+            ChildStatus::Completed(Some(json!({"result": 1}))),
+        );
+        statuses.insert(
+            "wf1-fj-1".into(),
+            ChildStatus::Completed(Some(json!({"result": 2}))),
+        );
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
     }
@@ -552,13 +583,15 @@ mod tests {
 
         let mut statuses = std::collections::HashMap::new();
         statuses.insert("wf1-fj-0".into(), ChildStatus::Completed(None));
-        statuses.insert("wf1-fj-1".into(), ChildStatus::Failed(None, Some("err".into())));
-        let exec = StubExecutor { child_statuses: statuses };
+        statuses.insert(
+            "wf1-fj-1".into(),
+            ChildStatus::Failed(None, Some("err".into())),
+        );
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Failed);
     }
@@ -579,12 +612,11 @@ mod tests {
         statuses.insert("wf1-fj-0".into(), ChildStatus::Running);
         statuses.insert("wf1-fj-1".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-2".into(), ChildStatus::NotFound);
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
         assert!(result.dispatch_jobs.len() >= 1 || result.dispatch_workflow_jobs.len() >= 1);
@@ -600,12 +632,11 @@ mod tests {
         let mut statuses = std::collections::HashMap::new();
         statuses.insert("wf1-fj-0".into(), ChildStatus::Running);
         statuses.insert("wf1-fj-1".into(), ChildStatus::Running);
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Await);
         assert!(result.dispatch_jobs.is_empty());
@@ -622,12 +653,11 @@ mod tests {
         let mut statuses = std::collections::HashMap::new();
         statuses.insert("wf1-fj-0".into(), ChildStatus::Completed(None));
         statuses.insert("wf1-fj-1".into(), ChildStatus::Skipped(None));
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Success);
     }
@@ -643,14 +673,19 @@ mod tests {
         let mut wf = make_instance();
 
         let mut statuses = std::collections::HashMap::new();
-        statuses.insert("wf1-fj-0".into(), ChildStatus::Failed(None, Some("err".into())));
-        statuses.insert("wf1-fj-1".into(), ChildStatus::Failed(None, Some("err".into())));
-        let exec = StubExecutor { child_statuses: statuses };
+        statuses.insert(
+            "wf1-fj-0".into(),
+            ChildStatus::Failed(None, Some("err".into())),
+        );
+        statuses.insert(
+            "wf1-fj-1".into(),
+            ChildStatus::Failed(None, Some("err".into())),
+        );
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
-        let result = plugin
-            .execute(&exec, &mut node, &mut wf)
-            .await
-            .unwrap();
+        let result = plugin.execute(&exec, &mut node, &mut wf).await.unwrap();
 
         assert_eq!(result.status, NodeExecutionStatus::Failed);
     }
@@ -671,10 +706,21 @@ mod tests {
         statuses.insert("wf1-fj-0".into(), ChildStatus::Completed(None));
         statuses.insert("wf1-fj-1".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-2".into(), ChildStatus::NotFound);
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
         let result = plugin
-            .handle_callback(&exec, &mut node, &mut wf, "wf1-fj-0", &NodeExecutionStatus::Success, &None, &None, &None)
+            .handle_callback(
+                &exec,
+                &mut node,
+                &mut wf,
+                "wf1-fj-0",
+                &NodeExecutionStatus::Success,
+                &None,
+                &None,
+                &None,
+            )
             .await
             .unwrap();
 
@@ -690,11 +736,25 @@ mod tests {
 
         let mut statuses = std::collections::HashMap::new();
         statuses.insert("wf1-fj-0".into(), ChildStatus::Completed(None));
-        statuses.insert("wf1-fj-1".into(), ChildStatus::Failed(None, Some("err".into())));
-        let exec = StubExecutor { child_statuses: statuses };
+        statuses.insert(
+            "wf1-fj-1".into(),
+            ChildStatus::Failed(None, Some("err".into())),
+        );
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
         let result = plugin
-            .handle_callback(&exec, &mut node, &mut wf, "wf1-fj-1", &NodeExecutionStatus::Failed, &None, &Some("err".into()), &None)
+            .handle_callback(
+                &exec,
+                &mut node,
+                &mut wf,
+                "wf1-fj-1",
+                &NodeExecutionStatus::Failed,
+                &None,
+                &Some("err".into()),
+                &None,
+            )
             .await
             .unwrap();
 
@@ -723,10 +783,21 @@ mod tests {
         statuses.insert("wf1-fj-2".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-3".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-4".into(), ChildStatus::NotFound);
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
         let result = plugin
-            .handle_callback(&exec, &mut node, &mut wf, "wf1-fj-0", &NodeExecutionStatus::Success, &None, &None, &None)
+            .handle_callback(
+                &exec,
+                &mut node,
+                &mut wf,
+                "wf1-fj-0",
+                &NodeExecutionStatus::Success,
+                &None,
+                &None,
+                &None,
+            )
             .await
             .unwrap();
 
@@ -757,10 +828,21 @@ mod tests {
         statuses.insert("wf1-fj-2".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-3".into(), ChildStatus::NotFound);
         statuses.insert("wf1-fj-4".into(), ChildStatus::NotFound);
-        let exec = StubExecutor { child_statuses: statuses };
+        let exec = StubExecutor {
+            child_statuses: statuses,
+        };
 
         let result = plugin
-            .handle_callback(&exec, &mut node, &mut wf, "wf1-fj-1", &NodeExecutionStatus::Success, &None, &None, &None)
+            .handle_callback(
+                &exec,
+                &mut node,
+                &mut wf,
+                "wf1-fj-1",
+                &NodeExecutionStatus::Success,
+                &None,
+                &None,
+                &None,
+            )
             .await
             .unwrap();
 

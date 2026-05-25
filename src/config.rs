@@ -44,9 +44,15 @@ pub struct SweeperConfig {
     pub max_recover_per_cycle: u32,
 }
 
-fn default_sweeper_enabled() -> bool { true }
-fn default_sweeper_interval() -> u64 { 60 }
-fn default_sweeper_max_recover() -> u32 { 10 }
+fn default_sweeper_enabled() -> bool {
+    true
+}
+fn default_sweeper_interval() -> u64 {
+    60
+}
+fn default_sweeper_max_recover() -> u32 {
+    10
+}
 
 impl Default for SweeperConfig {
     fn default() -> Self {

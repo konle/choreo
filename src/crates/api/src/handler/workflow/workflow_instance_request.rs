@@ -1,7 +1,7 @@
+use common::pagination::{Pagination, SortQuery};
 use domain::workflow::entity::query::{WorkflowInstanceFilter, WorkflowInstanceQuery};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
-use common::pagination::{Pagination, SortQuery};
 #[derive(Deserialize)]
 pub struct SkipWorkflowNodeRequest {
     pub node_id: String,
@@ -30,8 +30,12 @@ pub struct CreateWorkflowInstanceRequest {
     pub context: JsonValue,
 }
 
-fn default_page() -> Option<u64> { Some(1) }
-fn default_page_size() -> Option<u64> { Some(10) }
+fn default_page() -> Option<u64> {
+    Some(1)
+}
+fn default_page_size() -> Option<u64> {
+    Some(10)
+}
 
 #[derive(Deserialize)]
 pub struct ListWorkflowInstancesRequest {
@@ -48,8 +52,16 @@ pub struct ListWorkflowInstancesRequest {
 
 impl From<ListWorkflowInstancesRequest> for WorkflowInstanceQuery {
     fn from(request: ListWorkflowInstancesRequest) -> Self {
-        let pagination = Pagination::new(request.page.unwrap_or(Pagination::default().page), request.page_size.unwrap_or(Pagination::default().page_size));
-        let sort = SortQuery::new(request.sort_by.unwrap_or(SortQuery::default().sort_by), request.sort_order.unwrap_or(SortQuery::default().sort_order));
+        let pagination = Pagination::new(
+            request.page.unwrap_or(Pagination::default().page),
+            request.page_size.unwrap_or(Pagination::default().page_size),
+        );
+        let sort = SortQuery::new(
+            request.sort_by.unwrap_or(SortQuery::default().sort_by),
+            request
+                .sort_order
+                .unwrap_or(SortQuery::default().sort_order),
+        );
         let filter = WorkflowInstanceFilter {
             workflow_meta_id: request.workflow_meta_id,
             version: request.version,

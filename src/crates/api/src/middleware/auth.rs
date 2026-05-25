@@ -1,15 +1,15 @@
+use crate::response::response::Response as ApiResponse;
 use axum::{
+    Json,
     extract::Request,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::Response,
-    Json,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use domain::user::entity::TenantRole;
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-use domain::user::entity::TenantRole;
-use crate::response::response::Response as ApiResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -51,7 +51,10 @@ pub fn verify_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> 
     Ok(data.claims)
 }
 
-pub async fn auth_middleware(mut req: Request, next: Next) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
+pub async fn auth_middleware(
+    mut req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ApiResponse<()>>)> {
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -64,7 +67,10 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Result<Response, (
             warn!(path = %req.uri().path(), "missing or invalid Authorization header");
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(ApiResponse::error(401, "Missing or invalid Authorization header".to_string())),
+                Json(ApiResponse::error(
+                    401,
+                    "Missing or invalid Authorization header".to_string(),
+                )),
             ));
         }
     };
@@ -75,7 +81,10 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Result<Response, (
             warn!(path = %req.uri().path(), error = %e, "invalid or expired token");
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(ApiResponse::error(401, "Invalid or expired token".to_string())),
+                Json(ApiResponse::error(
+                    401,
+                    "Invalid or expired token".to_string(),
+                )),
             ));
         }
     };

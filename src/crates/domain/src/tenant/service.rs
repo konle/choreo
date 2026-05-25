@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use chrono::Utc;
-use uuid::Uuid;
 use crate::tenant::entity::{TenantEntity, TenantStatus};
-use crate::tenant::repository::{TenantRepository, RepositoryError};
+use crate::tenant::repository::{RepositoryError, TenantRepository};
+use chrono::Utc;
+use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct TenantService {
@@ -14,7 +14,11 @@ impl TenantService {
         Self { repository }
     }
 
-    pub async fn create_tenant(&self, name: String, description: String) -> Result<TenantEntity, RepositoryError> {
+    pub async fn create_tenant(
+        &self,
+        name: String,
+        description: String,
+    ) -> Result<TenantEntity, RepositoryError> {
         let now = Utc::now();
         let entity = TenantEntity {
             tenant_id: Uuid::new_v4().to_string(),

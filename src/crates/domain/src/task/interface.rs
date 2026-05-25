@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::TaskInstanceEntity;
 use crate::workflow::entity::workflow_definition::NodeExecutionStatus;
+use async_trait::async_trait;
 
 pub struct TaskExecutionResult {
     pub status: NodeExecutionStatus,
@@ -13,8 +13,11 @@ pub struct TaskExecutionResult {
 #[async_trait]
 pub trait TaskExecutor: Send + Sync {
     /// 执行任务的具体逻辑
-    async fn execute_task(&self, task_instance: &TaskInstanceEntity) -> anyhow::Result<TaskExecutionResult>;
-    
+    async fn execute_task(
+        &self,
+        task_instance: &TaskInstanceEntity,
+    ) -> anyhow::Result<TaskExecutionResult>;
+
     /// 获取该执行器支持的任务类型
     fn task_type(&self) -> TaskType;
 }

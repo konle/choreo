@@ -1,14 +1,14 @@
-use axum::{
-    extract::{Path, State},
-    routing::{get, post},
-    Json, Router,
-};
-use serde::Deserialize;
-use std::sync::Arc;
 use crate::error::ApiError;
 use crate::response::response::Response;
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::{get, post},
+};
 use domain::tenant::entity::TenantEntity;
 use domain::tenant::service::TenantService;
+use serde::Deserialize;
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct CreateTenantRequest {
@@ -30,7 +30,10 @@ impl TenantHandler {
 pub fn routes(handler: Arc<TenantHandler>) -> Router {
     Router::new()
         .route("/", post(create_tenant).get(list_tenants))
-        .route("/{id}", get(get_tenant).put(update_tenant).delete(delete_tenant))
+        .route(
+            "/{id}",
+            get(get_tenant).put(update_tenant).delete(delete_tenant),
+        )
         .route("/{id}/suspend", post(suspend_tenant))
         .with_state(handler)
 }
@@ -39,7 +42,10 @@ async fn create_tenant(
     State(handler): State<Arc<TenantHandler>>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<Response<TenantEntity>>, ApiError> {
-    let entity = handler.service.create_tenant(req.name, req.description).await?;
+    let entity = handler
+        .service
+        .create_tenant(req.name, req.description)
+        .await?;
     Ok(Json(Response::success(entity)))
 }
 

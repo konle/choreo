@@ -52,9 +52,9 @@ pub fn should_notify_parent_task(
     new: &TaskInstanceStatus,
 ) -> Option<TaskChildEventKind> {
     match (old, new) {
-        (TaskInstanceStatus::Running, TaskInstanceStatus::Completed) => {
-            Some(TaskChildEventKind::Terminated(TaskTerminalStatus::Completed))
-        }
+        (TaskInstanceStatus::Running, TaskInstanceStatus::Completed) => Some(
+            TaskChildEventKind::Terminated(TaskTerminalStatus::Completed),
+        ),
         (TaskInstanceStatus::Running, TaskInstanceStatus::Failed) => {
             Some(TaskChildEventKind::Terminated(TaskTerminalStatus::Failed))
         }
@@ -171,21 +171,17 @@ mod tests {
     #[test]
     fn test_should_notify_parent_task_terminated_completed() {
         assert_eq!(
-            should_notify_parent_task(
-                &TaskInstanceStatus::Running,
-                &TaskInstanceStatus::Completed
-            ),
-            Some(TaskChildEventKind::Terminated(TaskTerminalStatus::Completed))
+            should_notify_parent_task(&TaskInstanceStatus::Running, &TaskInstanceStatus::Completed),
+            Some(TaskChildEventKind::Terminated(
+                TaskTerminalStatus::Completed
+            ))
         );
     }
 
     #[test]
     fn test_should_notify_parent_task_terminated_failed() {
         assert_eq!(
-            should_notify_parent_task(
-                &TaskInstanceStatus::Running,
-                &TaskInstanceStatus::Failed
-            ),
+            should_notify_parent_task(&TaskInstanceStatus::Running, &TaskInstanceStatus::Failed),
             Some(TaskChildEventKind::Terminated(TaskTerminalStatus::Failed))
         );
     }
@@ -193,10 +189,7 @@ mod tests {
     #[test]
     fn test_should_notify_parent_task_revived() {
         assert_eq!(
-            should_notify_parent_task(
-                &TaskInstanceStatus::Failed,
-                &TaskInstanceStatus::Pending
-            ),
+            should_notify_parent_task(&TaskInstanceStatus::Failed, &TaskInstanceStatus::Pending),
             Some(TaskChildEventKind::Revived)
         );
     }
@@ -204,10 +197,7 @@ mod tests {
     #[test]
     fn test_should_notify_parent_task_no_event_normal() {
         assert_eq!(
-            should_notify_parent_task(
-                &TaskInstanceStatus::Pending,
-                &TaskInstanceStatus::Running
-            ),
+            should_notify_parent_task(&TaskInstanceStatus::Pending, &TaskInstanceStatus::Running),
             None
         );
     }
@@ -244,9 +234,7 @@ mod tests {
         let mut task = make_task_instance(TaskInstanceStatus::Running, Some(caller_ctx()));
         task.error_message = Some("timeout".into());
 
-        let result = task
-            .transition_status(TaskInstanceStatus::Failed)
-            .unwrap();
+        let result = task.transition_status(TaskInstanceStatus::Failed).unwrap();
 
         assert_eq!(result.outbound_events.len(), 1);
         let event = &result.outbound_events[0];
@@ -277,9 +265,7 @@ mod tests {
     fn test_task_transition_status_revived_with_caller() {
         let mut task = make_task_instance(TaskInstanceStatus::Failed, Some(caller_ctx()));
 
-        let result = task
-            .transition_status(TaskInstanceStatus::Pending)
-            .unwrap();
+        let result = task.transition_status(TaskInstanceStatus::Pending).unwrap();
 
         assert_eq!(result.outbound_events.len(), 1);
         let event = &result.outbound_events[0];

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use common::pagination::PaginatedData;
 use domain::shared::workflow::{WorkflowInstanceStatus, WorkflowStatus};
 use domain::workflow::entity::query::WorkflowInstanceQuery;
-use domain::workflow::entity::workflow_definition::{WorkflowEntity, WorkflowInstanceEntity, WorkflowMetaEntity};
+use domain::workflow::entity::workflow_definition::{
+    WorkflowEntity, WorkflowInstanceEntity, WorkflowMetaEntity,
+};
 use domain::workflow::repository::{
     RepositoryError, WorkflowDefinitionRepository, WorkflowInstanceRepository,
 };
@@ -227,8 +229,10 @@ impl WorkflowDefinitionRepository for WorkflowDefinitionRepositoryImpl {
         from_status: &WorkflowStatus,
         to_status: &WorkflowStatus,
     ) -> Result<(), RepositoryError> {
-        let from_bson = mongodb::bson::to_bson(from_status).map_err(|e| format!("serialize status: {e}"))?;
-        let to_bson = mongodb::bson::to_bson(to_status).map_err(|e| format!("serialize status: {e}"))?;
+        let from_bson =
+            mongodb::bson::to_bson(from_status).map_err(|e| format!("serialize status: {e}"))?;
+        let to_bson =
+            mongodb::bson::to_bson(to_status).map_err(|e| format!("serialize status: {e}"))?;
         let result = self.collection.update_one(doc! {"workflow_meta_id": &workflow_meta_id, "version": &version, "status": from_bson}, doc! {"$set": {"status": to_bson, "updated_at": mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize updated_at: {e}"))?}}).await?;
         if result.matched_count == 0 {
             return Err(format!(
@@ -277,7 +281,11 @@ pub struct WorkflowInstanceRepositoryImpl {
 impl WorkflowInstanceRepositoryImpl {
     // 避免排序注入
     const ALLOWED_SORT_FIELDS: &[&str] = &[
-        "created_at", "updated_at", "status", "workflow_meta_id", "workflow_version",
+        "created_at",
+        "updated_at",
+        "status",
+        "workflow_meta_id",
+        "workflow_version",
     ];
     fn validate_sort_field(field: &str) -> Result<(), RepositoryError> {
         if !Self::ALLOWED_SORT_FIELDS.contains(&field) {
@@ -296,10 +304,7 @@ impl WorkflowInstanceRepositoryImpl {
     }
 }
 
-
-
-
-impl WorkflowInstanceRepositoryImpl{
+impl WorkflowInstanceRepositoryImpl {
     fn build_filter(&self, query: &WorkflowInstanceQuery) -> Document {
         let mut filter = doc! {"tenant_id": &query.tenant_id};
         if let Some(workflow_meta_id) = &query.filter.workflow_meta_id {
@@ -350,7 +355,6 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         Ok(instance)
     }
 
-
     async fn list_workflow_instances(
         &self,
         _tenant_id: &str,
@@ -361,8 +365,15 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         let page_size = query.pagination.page_size;
         let skip = (page - 1) * page_size;
         Self::validate_sort_field(&query.sort.sort_by)?;
-        info!("list_workflow_instances filter: {:?} tenant_id: {} page: {} page_size: {}", filter, _tenant_id, page, page_size);
-        let sort_order:i32 = if query.sort.sort_order == "asc" { 1 } else { -1 };
+        info!(
+            "list_workflow_instances filter: {:?} tenant_id: {} page: {} page_size: {}",
+            filter, _tenant_id, page, page_size
+        );
+        let sort_order: i32 = if query.sort.sort_order == "asc" {
+            1
+        } else {
+            -1
+        };
         let sort_doc = doc! { &query.sort.sort_by: sort_order };
 
         let total = self
@@ -398,8 +409,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
     ) -> Result<WorkflowInstanceEntity, RepositoryError> {
         let from_bson = mongodb::bson::to_bson(from_status)
             .map_err(|e| format!("serialize from_status: {e}"))?;
-        let to_bson = mongodb::bson::to_bson(to_status)
-            .map_err(|e| format!("serialize to_status: {e}"))?;
+        let to_bson =
+            mongodb::bson::to_bson(to_status).map_err(|e| format!("serialize to_status: {e}"))?;
 
         let now_bson = mongodb::bson::to_bson(&chrono::Utc::now())
             .map_err(|e| format!("serialize now: {e}"))?;
@@ -439,7 +450,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         let now = chrono::Utc::now();
         let now_bson = mongodb::bson::to_bson(&now).map_err(|e| format!("serialize now: {e}"))?;
         let expiration = now - chrono::Duration::milliseconds(duration_ms as i64);
-        let expiration_bson = mongodb::bson::to_bson(&expiration).map_err(|e| format!("serialize expiration: {e}"))?;
+        let expiration_bson = mongodb::bson::to_bson(&expiration)
+            .map_err(|e| format!("serialize expiration: {e}"))?;
 
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
@@ -479,7 +491,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         workflow_instance_id: &str,
         worker_id: &str,
     ) -> Result<(), RepositoryError> {
-        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?;
+        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now())
+            .map_err(|e| format!("serialize now: {e}"))?;
 
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
@@ -622,7 +635,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         workflow_instance_id: &str,
         expected_epoch: u64,
     ) -> Result<(), RepositoryError> {
-        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now()).map_err(|e| format!("serialize now: {e}"))?;
+        let now_bson = mongodb::bson::to_bson(&chrono::Utc::now())
+            .map_err(|e| format!("serialize now: {e}"))?;
         let filter = doc! {
             "workflow_instance_id": workflow_instance_id,
             "epoch": expected_epoch as i64,
@@ -646,7 +660,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
             return Err(format!(
                 "CAS failed: instance {} epoch {} was already modified",
                 workflow_instance_id, expected_epoch
-            ).into());
+            )
+            .into());
         }
         Ok(())
     }
@@ -656,8 +671,8 @@ impl WorkflowInstanceRepository for WorkflowInstanceRepositoryImpl {
         status: &WorkflowInstanceStatus,
         limit: u32,
     ) -> Result<Vec<WorkflowInstanceEntity>, RepositoryError> {
-        let status_bson = mongodb::bson::to_bson(status)
-            .map_err(|e| format!("serialize status: {e}"))?;
+        let status_bson =
+            mongodb::bson::to_bson(status).map_err(|e| format!("serialize status: {e}"))?;
         let filter = doc! { "status": status_bson };
 
         let mut cursor = self

@@ -11,8 +11,8 @@ use domain::workflow::entity::workflow_definition::NodeExecutionStatus;
 use domain::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 use infrastructure::queue::consumer;
 use infrastructure::queue::dispatcher::ApalisDispatcher;
-use tokio::time::Instant;
 use std::sync::Arc;
+use tokio::time::Instant;
 use tracing::{error, info, warn};
 use workflow::config::AppConfig;
 
@@ -53,7 +53,9 @@ fn build_outbound_for_task(
     error_message: Option<String>,
     input: Option<serde_json::Value>,
 ) -> Option<ExecuteWorkflowJob> {
-    use domain::task::entity::transition::{should_notify_parent_task, TaskChildEventKind, TaskTerminalStatus};
+    use domain::task::entity::transition::{
+        TaskChildEventKind, TaskTerminalStatus, should_notify_parent_task,
+    };
 
     let event_kind = should_notify_parent_task(old_status, new_status)?;
     let caller = job.caller_context.as_ref()?;
@@ -116,13 +118,25 @@ async fn handle_task_job(
                 "task execution failed"
             );
             // CAS: running -> failed
-            if let Err(cas_err) = task_svc.fail_with_error(&job.task_instance_id, e.to_string(), Some(start.elapsed().as_millis() as u64)).await {
+            if let Err(cas_err) = task_svc
+                .fail_with_error(
+                    &job.task_instance_id,
+                    e.to_string(),
+                    Some(start.elapsed().as_millis() as u64),
+                )
+                .await
+            {
                 warn!(task_instance_id = %job.task_instance_id, error = %cas_err, "CAS fail_with_error failed (may already be terminal)");
             }
 
             let new_status = domain::shared::workflow::TaskInstanceStatus::Failed;
             if let Some(outbound) = build_outbound_for_task(
-                &job, &old_task_status, &new_status, None, Some(e.to_string()), None,
+                &job,
+                &old_task_status,
+                &new_status,
+                None,
+                Some(e.to_string()),
+                None,
             ) {
                 if let Err(dispatch_err) = manager.dispatcher().dispatch_workflow(outbound).await {
                     error!(
@@ -142,19 +156,25 @@ async fn handle_task_job(
     // Determine new task status
     let new_task_status = match exec_result.status {
         NodeExecutionStatus::Success => {
-            if let Err(e) = task_svc.complete_with_output(
-                &job.task_instance_id,
-                exec_result.output.clone(),
-                exec_result.input.clone(),
-                Some(execution_duration),
-            ).await {
+            if let Err(e) = task_svc
+                .complete_with_output(
+                    &job.task_instance_id,
+                    exec_result.output.clone(),
+                    exec_result.input.clone(),
+                    Some(execution_duration),
+                )
+                .await
+            {
                 warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
             }
             domain::shared::workflow::TaskInstanceStatus::Completed
         }
         _ => {
             let error_msg = exec_result.error_message.clone().unwrap_or_default();
-            if let Err(e) = task_svc.fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration)).await {
+            if let Err(e) = task_svc
+                .fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration))
+                .await
+            {
                 warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
             }
             domain::shared::workflow::TaskInstanceStatus::Failed
@@ -188,7 +208,7 @@ async fn handle_task_job(
 
     Ok(())
 }
-    fn create_plugin_manager(
+fn create_plugin_manager(
     workflow_definition_svc: WorkflowDefinitionService,
     workflow_instance_svc: Arc<WorkflowInstanceService>,
     task_instance_svc: Arc<TaskInstanceService>,

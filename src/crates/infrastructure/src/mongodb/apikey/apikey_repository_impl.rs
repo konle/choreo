@@ -45,7 +45,10 @@ impl ApiKeyRepository for ApiKeyRepositoryImpl {
     }
 
     async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<ApiKeyEntity>, RepositoryError> {
-        let cursor = self.collection.find(doc! { "tenant_id": tenant_id }).await?;
+        let cursor = self
+            .collection
+            .find(doc! { "tenant_id": tenant_id })
+            .await?;
         Ok(cursor.try_collect().await?)
     }
 }

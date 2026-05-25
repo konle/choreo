@@ -1,15 +1,17 @@
+use crate::error::ApiError;
+use crate::middleware::auth::AuthContext;
+use crate::middleware::permission_guard::{
+    Guard, RequireMetaVariableWrite, RequireTenantVariableWrite,
+};
+use crate::response::response::Response;
 use axum::{
+    Json, Router,
     extract::{Extension, Path, State},
     routing::{get, post},
-    Json, Router,
 };
 use domain::variable::entity::{VariableEntity, VariableScope, VariableType};
 use domain::variable::service::VariableService;
 use serde::Deserialize;
-use crate::error::ApiError;
-use crate::middleware::auth::AuthContext;
-use crate::middleware::permission_guard::{Guard, RequireTenantVariableWrite, RequireMetaVariableWrite};
-use crate::response::response::Response;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -41,14 +43,24 @@ pub struct UpdateVariableRequest {
 pub fn tenant_variable_routes(handler: Arc<VariableHandler>) -> Router {
     Router::new()
         .route("/", post(create_tenant_variable).get(list_tenant_variables))
-        .route("/{id}", get(get_tenant_variable).put(update_tenant_variable).delete(delete_tenant_variable))
+        .route(
+            "/{id}",
+            get(get_tenant_variable)
+                .put(update_tenant_variable)
+                .delete(delete_tenant_variable),
+        )
         .with_state(handler)
 }
 
 pub fn workflow_meta_variable_routes(handler: Arc<VariableHandler>) -> Router {
     Router::new()
         .route("/", post(create_meta_variable).get(list_meta_variables))
-        .route("/{var_id}", get(get_meta_variable).put(update_meta_variable).delete(delete_meta_variable))
+        .route(
+            "/{var_id}",
+            get(get_meta_variable)
+                .put(update_meta_variable)
+                .delete(delete_meta_variable),
+        )
         .with_state(handler)
 }
 
@@ -81,7 +93,8 @@ async fn list_tenant_variables(
     State(handler): State<Arc<VariableHandler>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Response<Vec<VariableEntity>>>, ApiError> {
-    let result = handler.service
+    let result = handler
+        .service
         .list_by_scope(&auth.tenant_id, &VariableScope::Tenant, &auth.tenant_id)
         .await?;
     Ok(Json(Response::success(result)))
@@ -162,7 +175,8 @@ async fn list_meta_variables(
     Extension(auth): Extension<AuthContext>,
     Path(meta_id): Path<String>,
 ) -> Result<Json<Response<Vec<VariableEntity>>>, ApiError> {
-    let result = handler.service
+    let result = handler
+        .service
         .list_by_scope(&auth.tenant_id, &VariableScope::WorkflowMeta, &meta_id)
         .await?;
     Ok(Json(Response::success(result)))
@@ -211,4 +225,3 @@ async fn delete_meta_variable(
     handler.service.delete(&auth.tenant_id, &var_id).await?;
     Ok(Json(Response::success(())))
 }
-

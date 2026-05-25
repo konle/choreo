@@ -7,8 +7,8 @@
 //! leaving the Parallel state (success_count / processed_callbacks) updated in
 //! the DB but the workflow status / node status stale.
 
-use super::loop_action::LoopAction;
 use super::PluginManager;
+use super::loop_action::LoopAction;
 use crate::plugin::interface::ExecutionResult;
 use crate::shared::workflow::WorkflowInstanceStatus;
 use crate::workflow::entity::transition::should_notify_parent;
@@ -61,7 +61,8 @@ impl PluginManager {
             .await;
 
         for job in &exec_result.dispatch_jobs {
-            self.ensure_task_instance_for_job(instance, node_index, job).await?;
+            self.ensure_task_instance_for_job(instance, node_index, job)
+                .await?;
         }
 
         for job in exec_result.dispatch_jobs {

@@ -1,17 +1,20 @@
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-    Json,
-};
-use domain::user::entity::Permission;
 use crate::middleware::auth::AuthContext;
 use crate::response::response::Response as ApiResponse;
+use axum::{Json, extract::Request, http::StatusCode, middleware::Next, response::Response};
+use domain::user::entity::Permission;
 
 pub fn require_permission(
     permission: Permission,
-) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, (StatusCode, Json<ApiResponse<()>>)>> + Send>> + Clone + Send {
+) -> impl Fn(
+    Request,
+    Next,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Response, (StatusCode, Json<ApiResponse<()>>)>>
+            + Send,
+    >,
+> + Clone
++ Send {
     move |req: Request, next: Next| {
         let perm = permission.clone();
         Box::pin(async move {
@@ -41,15 +44,26 @@ pub fn require_permission(
                 Some(role) if role.has_permission(&perm) => Ok(next.run(req).await),
                 _ => Err((
                     StatusCode::FORBIDDEN,
-                    Json(ApiResponse::error(403, "Insufficient permissions".to_string())),
+                    Json(ApiResponse::error(
+                        403,
+                        "Insufficient permissions".to_string(),
+                    )),
                 )),
             }
         })
     }
 }
 
-pub fn require_super_admin(
-) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, (StatusCode, Json<ApiResponse<()>>)>> + Send>> + Clone + Send {
+pub fn require_super_admin() -> impl Fn(
+    Request,
+    Next,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Response, (StatusCode, Json<ApiResponse<()>>)>>
+            + Send,
+    >,
+> + Clone
++ Send {
     move |req: Request, next: Next| {
         Box::pin(async move {
             let ctx = req.extensions().get::<AuthContext>().cloned();

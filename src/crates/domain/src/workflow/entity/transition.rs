@@ -250,8 +250,7 @@ mod tests {
 
     #[test]
     fn test_transition_status_with_parent_context_revived() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Failed, Some(parent_ctx()));
+        let mut instance = make_instance(WorkflowInstanceStatus::Failed, Some(parent_ctx()));
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Pending)
@@ -299,8 +298,7 @@ mod tests {
 
     #[test]
     fn test_transition_status_pending_to_running_no_event() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Pending, Some(parent_ctx()));
+        let mut instance = make_instance(WorkflowInstanceStatus::Pending, Some(parent_ctx()));
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Running)
@@ -312,8 +310,7 @@ mod tests {
 
     #[test]
     fn test_transition_status_running_to_completed_emits_terminated() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Running, Some(parent_ctx()));
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, Some(parent_ctx()));
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Completed)
@@ -332,8 +329,7 @@ mod tests {
 
     #[test]
     fn test_transition_status_running_to_failed_emits_terminated() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Running, Some(parent_ctx()));
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, Some(parent_ctx()));
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Failed)
@@ -352,8 +348,7 @@ mod tests {
 
     #[test]
     fn test_transition_status_running_to_completed_no_parent_no_event() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Running, None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, None);
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Completed)
@@ -365,8 +360,7 @@ mod tests {
 
     #[test]
     fn test_transition_dispatch_jobs() {
-        let mut instance =
-            make_instance(WorkflowInstanceStatus::Failed, Some(parent_ctx()));
+        let mut instance = make_instance(WorkflowInstanceStatus::Failed, Some(parent_ctx()));
 
         let result = instance
             .transition_status(WorkflowInstanceStatus::Pending)
@@ -376,9 +370,6 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].workflow_instance_id, "parent-wf-1");
         assert_eq!(jobs[0].tenant_id, "t1");
-        assert!(matches!(
-            jobs[0].event,
-            WorkflowEvent::ChildRevived { .. }
-        ));
+        assert!(matches!(jobs[0].event, WorkflowEvent::ChildRevived { .. }));
     }
 }

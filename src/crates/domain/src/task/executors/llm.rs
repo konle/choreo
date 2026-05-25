@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::{LlmResponseFormat, TaskInstanceEntity, TaskTemplate};
@@ -38,17 +38,21 @@ impl TaskExecutor for LlmTaskExecutor {
             }
         };
 
-        let input = task_instance.input.as_ref().cloned().unwrap_or_else(|| json!({}));
+        let input = task_instance
+            .input
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| json!({}));
 
-        let system_prompt = input.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let system_prompt = input
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let user_prompt = input
             .get("user_prompt")
             .and_then(|v| v.as_str())
             .unwrap_or(&config.user_prompt);
-        let api_key = input
-            .get("_api_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let api_key = input.get("_api_key").and_then(|v| v.as_str()).unwrap_or("");
 
         let base_url = input
             .get("base_url")
@@ -108,8 +112,7 @@ impl TaskExecutor for LlmTaskExecutor {
             }
 
             if config.timeout > 0 {
-                request =
-                    request.timeout(std::time::Duration::from_secs(config.timeout as u64));
+                request = request.timeout(std::time::Duration::from_secs(config.timeout as u64));
             }
 
             match request.send().await {
@@ -158,9 +161,11 @@ impl TaskExecutor for LlmTaskExecutor {
                                             ));
                                             if attempt < config.retry_count {
                                                 if config.retry_delay > 0 {
-                                                    tokio::time::sleep(std::time::Duration::from_secs(
-                                                        config.retry_delay as u64,
-                                                    ))
+                                                    tokio::time::sleep(
+                                                        std::time::Duration::from_secs(
+                                                            config.retry_delay as u64,
+                                                        ),
+                                                    )
                                                     .await;
                                                 }
                                             }
@@ -203,8 +208,7 @@ impl TaskExecutor for LlmTaskExecutor {
                                     error = %e,
                                     "LLM response is not valid JSON"
                                 );
-                                last_error =
-                                    Some(format!("LLM response parse error: {}", e));
+                                last_error = Some(format!("LLM response parse error: {}", e));
                             }
                         }
                     } else if status_code == 429 {
@@ -236,8 +240,7 @@ impl TaskExecutor for LlmTaskExecutor {
                             attempt = attempt + 1,
                             "LLM server error"
                         );
-                        last_error =
-                            Some(format!("LLM API error {}: {}", status_code, resp_body));
+                        last_error = Some(format!("LLM API error {}: {}", status_code, resp_body));
                     }
                 }
                 Err(e) => {
@@ -252,10 +255,7 @@ impl TaskExecutor for LlmTaskExecutor {
             }
 
             if attempt < config.retry_count && config.retry_delay > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    config.retry_delay as u64,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
             }
         }
 

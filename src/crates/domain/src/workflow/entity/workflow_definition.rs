@@ -2,33 +2,31 @@ use std::fmt;
 
 use crate::shared::form::Form;
 use crate::shared::job::WorkflowCallerContext;
-use crate::shared::workflow::{TaskType, WorkflowInstanceStatus};
 use crate::shared::workflow::WorkflowStatus;
-use crate::task::entity::task_definition::{TaskTemplate, TaskInstanceEntity};
+use crate::shared::workflow::{TaskType, WorkflowInstanceStatus};
+use crate::task::entity::task_definition::{TaskInstanceEntity, TaskTemplate};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowMetaEntity {
     pub workflow_meta_id: String, // 工作流模板ID workflow_meta_id 组成唯一性索引
-    pub tenant_id: String, // 租户ID tenant_id + workflow_meta_id 组成索引
+    pub tenant_id: String,        // 租户ID tenant_id + workflow_meta_id 组成索引
     pub name: String,
-    pub description: String, // 工作流模板描述
-    pub created_at: DateTime<Utc>, // 创建时间
-    pub updated_at: DateTime<Utc>, // 更新时间
+    pub description: String,               // 工作流模板描述
+    pub created_at: DateTime<Utc>,         // 创建时间
+    pub updated_at: DateTime<Utc>,         // 更新时间
     pub deleted_at: Option<DateTime<Utc>>, // 删除时间
-    pub status: WorkflowStatus, // 工作流模板状态
-    pub form: Vec<Form>, // 工作流模板表单
+    pub status: WorkflowStatus,            // 工作流模板状态
+    pub form: Vec<Form>,                   // 工作流模板表单
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowEntity {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
-    pub version: u32, // 工作流版本
+    pub version: u32,             // 工作流版本
     pub workflow_meta_id: String, // 工作流模板ID + version组成唯一性索引
     pub status: WorkflowStatus,
     pub entry_node: String, // 入口节点
@@ -56,7 +54,7 @@ pub struct WorkflowInstanceEntity {
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub context: JsonValue,
-    pub entry_node: String, // 入口节点
+    pub entry_node: String,   // 入口节点
     pub current_node: String, // 当前节点
     pub nodes: Vec<WorkflowNodeInstanceEntity>,
     pub epoch: u64,
@@ -87,8 +85,6 @@ impl fmt::Display for WorkflowInstanceEntity {
         )
     }
 }
-
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeExecutionStatus {
