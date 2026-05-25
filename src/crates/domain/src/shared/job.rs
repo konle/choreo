@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowEvent {
     Start,
-    NodeCallback {
+    NodeCallback { // FixedMe: 完全事件化之后 这个数据结构就可以简化了。因为工作流会从DB收集。
         node_id: String,
         child_task_id: String,
         status: crate::workflow::entity::workflow_definition::NodeExecutionStatus,
