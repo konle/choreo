@@ -16,6 +16,18 @@ fn hash_api_key(full_key: &str) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_consistency() {
+        let h1 = hash_api_key("test-key-123");
+        let h2 = hash_api_key("test-key-123");
+        assert_eq!(h1, h2);
+    }
+}
+
 fn generate_secret_tail() -> String {
     let mut rng = rand::thread_rng();
     (0..32u8)

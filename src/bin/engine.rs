@@ -56,32 +56,20 @@ fn build_outbound_for_task(
     input: Option<serde_json::Value>,
 ) -> Option<ExecuteWorkflowJob> {
     use domain::task::entity::transition::{
-        TaskChildEventKind, TaskTerminalStatus, should_notify_parent_task,
+        build_workflow_event_for_task, should_notify_parent_task,
     };
 
     let event_kind = should_notify_parent_task(old_status, new_status)?;
     let caller = job.caller_context.as_ref()?;
 
-    let event = match event_kind {
-        TaskChildEventKind::Terminated(terminal) => {
-            let status = match terminal {
-                TaskTerminalStatus::Completed => NodeExecutionStatus::Success,
-                TaskTerminalStatus::Failed => NodeExecutionStatus::Failed,
-            };
-            WorkflowEvent::NodeCallback {
-                node_id: caller.node_id.clone(),
-                child_task_id: job.task_instance_id.clone(),
-                status,
-                output,
-                error_message,
-                input,
-            }
-        }
-        TaskChildEventKind::Revived => WorkflowEvent::ChildRevived {
-            node_id: caller.node_id.clone(),
-            child_id: job.task_instance_id.clone(),
-        },
-    };
+    let event = build_workflow_event_for_task(
+        &event_kind,
+        caller,
+        &job.task_instance_id,
+        output,
+        error_message,
+        input,
+    );
 
     Some(ExecuteWorkflowJob {
         workflow_instance_id: caller.workflow_instance_id.clone(),

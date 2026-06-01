@@ -16,6 +16,40 @@ pub enum TaskTerminalStatus {
     Failed,
 }
 
+pub fn terminal_to_node_exec_status(terminal: &TaskTerminalStatus) -> NodeExecutionStatus {
+    match terminal {
+        TaskTerminalStatus::Completed => NodeExecutionStatus::Success,
+        TaskTerminalStatus::Failed => NodeExecutionStatus::Failed,
+    }
+}
+
+pub fn build_workflow_event_for_task(
+    event_kind: &TaskChildEventKind,
+    caller: &crate::shared::job::WorkflowCallerContext,
+    child_task_id: &str,
+    output: Option<serde_json::Value>,
+    error_message: Option<String>,
+    input: Option<serde_json::Value>,
+) -> WorkflowEvent {
+    match event_kind {
+        TaskChildEventKind::Revived => WorkflowEvent::ChildRevived {
+            node_id: caller.node_id.clone(),
+            child_id: child_task_id.to_string(),
+        },
+        TaskChildEventKind::Terminated(terminal) => {
+            let status = terminal_to_node_exec_status(terminal);
+            WorkflowEvent::NodeCallback {
+                node_id: caller.node_id.clone(),
+                child_task_id: child_task_id.to_string(),
+                status,
+                output,
+                error_message,
+                input,
+            }
+        }
+    }
+}
+
 /// An outbound event produced by a task status transition.
 #[derive(Debug, Clone)]
 pub struct TaskOutboundEvent {
@@ -89,26 +123,14 @@ impl TaskInstanceEntity {
 
         if let Some(event_kind) = should_notify_parent_task(&old_status, &new_status) {
             if let Some(ref caller_ctx) = self.caller_context {
-                let event = match event_kind {
-                    TaskChildEventKind::Revived => WorkflowEvent::ChildRevived {
-                        node_id: caller_ctx.node_id.clone(),
-                        child_id: self.task_instance_id.clone(),
-                    },
-                    TaskChildEventKind::Terminated(terminal) => {
-                        let status = match terminal {
-                            TaskTerminalStatus::Completed => NodeExecutionStatus::Success,
-                            TaskTerminalStatus::Failed => NodeExecutionStatus::Failed,
-                        };
-                        WorkflowEvent::NodeCallback {
-                            node_id: caller_ctx.node_id.clone(),
-                            child_task_id: self.task_instance_id.clone(),
-                            status,
-                            output: self.output.clone(),
-                            error_message: self.error_message.clone(),
-                            input: self.input.clone(),
-                        }
-                    }
-                };
+                let event = build_workflow_event_for_task(
+                    &event_kind,
+                    caller_ctx,
+                    &self.task_instance_id,
+                    self.output.clone(),
+                    self.error_message.clone(),
+                    self.input.clone(),
+                );
 
                 outbound_events.push(TaskOutboundEvent {
                     target_workflow_instance_id: caller_ctx.workflow_instance_id.clone(),

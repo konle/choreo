@@ -93,6 +93,29 @@ pub struct InitConfig {
     pub default_tenant_description: String,
 }
 
+pub fn apply_env_overrides(
+    config: &mut AppConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) {
+    if let Some(v) = lookup("MONGO_URL") {
+        config.database.mongo_url = v;
+    }
+    if let Some(v) = lookup("REDIS_URL") {
+        config.database.redis_url = v;
+    }
+    if let Some(v) = lookup("API_PORT") {
+        if let Ok(port) = v.parse() {
+            config.server.port = port;
+        }
+    }
+    if let Some(v) = lookup("VARIABLE_ENCRYPT_KEY") {
+        config.security.variable_encrypt_key = v;
+    }
+    if let Some(v) = lookup("LOG_LEVEL") {
+        config.log.level = v;
+    }
+}
+
 impl AppConfig {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(Path::new(path))
@@ -100,24 +123,64 @@ impl AppConfig {
         let mut config: AppConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("failed to parse config file '{}': {}", path, e))?;
 
-        if let Ok(v) = std::env::var("MONGO_URL") {
-            config.database.mongo_url = v;
-        }
-        if let Ok(v) = std::env::var("REDIS_URL") {
-            config.database.redis_url = v;
-        }
-        if let Ok(v) = std::env::var("API_PORT") {
-            if let Ok(port) = v.parse() {
-                config.server.port = port;
-            }
-        }
-        if let Ok(v) = std::env::var("VARIABLE_ENCRYPT_KEY") {
-            config.security.variable_encrypt_key = v;
-        }
-        if let Ok(v) = std::env::var("LOG_LEVEL") {
-            config.log.level = v;
-        }
+        apply_env_overrides(&mut config, |k| std::env::var(k).ok());
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_config() -> AppConfig {
+        AppConfig {
+            server: ServerConfig { port: 3000 },
+            database: DatabaseConfig { mongo_url: "mongodb://localhost".into(), redis_url: "redis://localhost".into() },
+            security: SecurityConfig { variable_encrypt_key: "default".into() },
+            log: LogConfig { level: "info".into(), format: "json".into() },
+            init: InitConfig {
+                admin_username: "admin".into(), admin_password: "admin".into(),
+                admin_email: "a@b.com".into(), default_tenant_name: "default".into(),
+                default_tenant_description: "".into(),
+            },
+            sweeper: Default::default(),
+            notification: Default::default(),
+        }
+    }
+
+    #[test]
+    fn apply_env_overrides_modifies_config() {
+        let mut config = default_config();
+        let overrides = vec![
+            ("MONGO_URL", "mongodb://prod"),
+            ("REDIS_URL", "redis://prod"),
+            ("API_PORT", "8080"),
+            ("VARIABLE_ENCRYPT_KEY", "prod-key"),
+            ("LOG_LEVEL", "debug"),
+        ];
+        apply_env_overrides(&mut config, |k| {
+            overrides.iter().find(|(ok, _)| *ok == k).map(|(_, v)| v.to_string())
+        });
+        assert_eq!(config.database.mongo_url, "mongodb://prod");
+        assert_eq!(config.database.redis_url, "redis://prod");
+        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.security.variable_encrypt_key, "prod-key");
+        assert_eq!(config.log.level, "debug");
+    }
+
+    #[test]
+    fn apply_env_overrides_no_vars_no_change() {
+        let mut config = default_config();
+        let port_before = config.server.port;
+        apply_env_overrides(&mut config, |_| None);
+        assert_eq!(config.server.port, port_before);
+    }
+
+    #[test]
+    fn apply_env_overrides_invalid_port_ignored() {
+        let mut config = default_config();
+        apply_env_overrides(&mut config, |k| if k == "API_PORT" { Some("abc".into()) } else { None });
+        assert_eq!(config.server.port, 3000);
     }
 }
