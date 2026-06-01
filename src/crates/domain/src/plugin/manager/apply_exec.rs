@@ -11,7 +11,6 @@ use super::PluginManager;
 use super::loop_action::LoopAction;
 use crate::plugin::interface::ExecutionResult;
 use crate::shared::workflow::WorkflowInstanceStatus;
-use crate::workflow::entity::transition::should_notify_parent;
 use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity};
 use tracing::{error, warn};
 
@@ -133,8 +132,8 @@ impl PluginManager {
         instance: &WorkflowInstanceEntity,
         old_status: &WorkflowInstanceStatus,
     ) {
-        use crate::shared::job::{ExecuteWorkflowJob, WorkflowEvent};
-        use crate::workflow::entity::transition::{ChildEventKind, TerminalStatus};
+        use crate::shared::job::ExecuteWorkflowJob;
+        use crate::workflow::entity::transition::should_notify_parent;
 
         let Some(event_kind) = should_notify_parent(old_status, &instance.status) else {
             return;
@@ -144,26 +143,12 @@ impl PluginManager {
             return;
         };
 
-        let event = match event_kind {
-            ChildEventKind::Revived => WorkflowEvent::ChildRevived {
-                node_id: parent_ctx.node_id.clone(),
-                child_id: instance.workflow_instance_id.clone(),
-            },
-            ChildEventKind::Terminated(terminal) => {
-                let status = match terminal {
-                    TerminalStatus::Completed => NodeExecutionStatus::Success,
-                    TerminalStatus::Failed => NodeExecutionStatus::Failed,
-                };
-                WorkflowEvent::NodeCallback {
-                    node_id: parent_ctx.node_id.clone(),
-                    child_task_id: instance.workflow_instance_id.clone(),
-                    status,
-                    output: Some(instance.context.clone()),
-                    error_message: None,
-                    input: None,
-                }
-            }
-        };
+        let event = Self::build_event_from_transition(
+            &event_kind,
+            parent_ctx,
+            &instance.workflow_instance_id,
+            &instance.context,
+        );
 
         let job = ExecuteWorkflowJob {
             workflow_instance_id: parent_ctx.workflow_instance_id.clone(),
@@ -177,6 +162,37 @@ impl PluginManager {
                 error = %e,
                 "failed to dispatch outbound event to parent"
             );
+        }
+    }
+
+    fn build_event_from_transition(
+        event_kind: &crate::workflow::entity::transition::ChildEventKind,
+        parent_ctx: &crate::shared::job::WorkflowCallerContext,
+        child_id: &str,
+        context: &serde_json::Value,
+    ) -> crate::shared::job::WorkflowEvent {
+        use crate::shared::job::WorkflowEvent;
+        use crate::workflow::entity::transition::{ChildEventKind, TerminalStatus};
+
+        match event_kind {
+            ChildEventKind::Revived => WorkflowEvent::ChildRevived {
+                node_id: parent_ctx.node_id.clone(),
+                child_id: child_id.to_string(),
+            },
+            ChildEventKind::Terminated(terminal) => {
+                let status = match terminal {
+                    TerminalStatus::Completed => NodeExecutionStatus::Success,
+                    TerminalStatus::Failed => NodeExecutionStatus::Failed,
+                };
+                WorkflowEvent::NodeCallback {
+                    node_id: parent_ctx.node_id.clone(),
+                    child_task_id: child_id.to_string(),
+                    status,
+                    output: Some(context.clone()),
+                    error_message: None,
+                    input: None,
+                }
+            }
         }
     }
 
