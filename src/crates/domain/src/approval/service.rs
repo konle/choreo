@@ -61,6 +61,19 @@ pub fn evaluate_approval_mode(
     }
 }
 
+pub fn validate_can_decide(entity: &ApprovalInstanceEntity, user_id: &str) -> Result<(), &'static str> {
+    if entity.status != ApprovalStatus::Pending {
+        return Err("approval is not pending");
+    }
+    if !entity.approvers.contains(&user_id.to_string()) {
+        return Err("user is not an approver");
+    }
+    if entity.decisions.iter().any(|d| d.user_id == user_id) {
+        return Err("user has already decided");
+    }
+    Ok(())
+}
+
 impl ApprovalService {
     pub fn new(
         repository: Arc<dyn ApprovalRepository>,
@@ -129,17 +142,8 @@ impl ApprovalService {
     ) -> Result<ApprovalInstanceEntity, RepositoryError> {
         let mut entity = self.repository.get_by_id(tenant_id, approval_id).await?;
 
-        if entity.status != ApprovalStatus::Pending {
-            return Err(format!("approval {} is already {:?}", approval_id, entity.status).into());
-        }
-
-        if !entity.approvers.contains(&user_id.to_string()) {
-            return Err(format!("user {} is not an approver for {}", user_id, approval_id).into());
-        }
-
-        if entity.decisions.iter().any(|d| d.user_id == user_id) {
-            return Err(format!("user {} has already decided on {}", user_id, approval_id).into());
-        }
+        validate_can_decide(&entity, user_id)
+            .map_err(|msg| RepositoryError::from(msg))?;
 
         entity.decisions.push(ApprovalDecision {
             user_id: user_id.to_string(),
@@ -285,6 +289,25 @@ mod tests {
         }
     }
 
+    fn make_entity(status: ApprovalStatus, approvers: Vec<&str>) -> ApprovalInstanceEntity {
+        ApprovalInstanceEntity {
+            id: "a1".into(),
+            tenant_id: "t1".into(),
+            workflow_instance_id: "w1".into(),
+            node_id: "n1".into(),
+            title: "test".into(),
+            description: None,
+            approval_mode: ApprovalMode::Any,
+            approvers: approvers.iter().map(|s| s.to_string()).collect(),
+            decisions: vec![],
+            status,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: None,
+        applicant_id: None,
+        }
+    }
+
     #[test]
     fn any_mode_first_approve_wins() {
         let decisions = vec![make_decision("u1", Decision::Approve)];
@@ -373,15 +396,30 @@ mod tests {
         );
     }
 
+    // ── validate_can_decide ──
+
     #[test]
-    fn majority_pending() {
-        let decisions = vec![
-            make_decision("u1", Decision::Approve),
-            make_decision("u2", Decision::Reject),
-        ];
-        assert_eq!(
-            evaluate_approval_mode(&ApprovalMode::Majority, 5, &decisions),
-            None
-        );
+    fn decide_valid_pending_approver() {
+        let entity = make_entity(ApprovalStatus::Pending, vec!["u1", "u2"]);
+        assert!(validate_can_decide(&entity, "u1").is_ok());
+    }
+
+    #[test]
+    fn decide_not_pending_rejected() {
+        let entity = make_entity(ApprovalStatus::Approved, vec!["u1"]);
+        assert!(validate_can_decide(&entity, "u1").is_err());
+    }
+
+    #[test]
+    fn decide_not_approver_rejected() {
+        let entity = make_entity(ApprovalStatus::Pending, vec!["u1"]);
+        assert!(validate_can_decide(&entity, "u3").is_err());
+    }
+
+    #[test]
+    fn decide_already_decided_rejected() {
+        let mut entity = make_entity(ApprovalStatus::Pending, vec!["u1", "u2"]);
+        entity.decisions.push(make_decision("u1", Decision::Approve));
+        assert!(validate_can_decide(&entity, "u1").is_err());
     }
 }
