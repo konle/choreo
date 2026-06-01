@@ -205,6 +205,12 @@ mod integration_tests {
         }
     }
 
+    fn make_instance_with_status(id: &str, status: WorkflowInstanceStatus) -> WorkflowInstanceEntity {
+        let mut inst = make_pending_instance(id);
+        inst.status = status;
+        inst
+    }
+
     // ── process_workflow_job ──
 
     #[tokio::test]
@@ -449,6 +455,100 @@ mod integration_tests {
         .await
         .unwrap();
         let jobs = dispatcher.take_workflow_jobs();
-        assert_eq!(jobs.len(), 2); // ChildRevived to parent + Start to self
+        assert_eq!(jobs.len(), 2);
+    }
+
+    // ── resolve_child_status SubWorkflow paths ──
+
+    fn subw_template() -> TaskTemplate {
+        TaskTemplate::SubWorkflow(crate::task::entity::task_definition::SubWorkflowTemplate {
+            workflow_meta_id: "m1".into(), workflow_version: 1, form: vec![], timeout: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_not_found() {
+        let (pm, _dispatcher) = make_pm(vec![]);
+        let result = pm.resolve_child_status("no-such", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::NotFound));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_completed() {
+        let inst = make_instance_with_status("sub-1", WorkflowInstanceStatus::Completed);
+        let (pm, _dispatcher) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-1", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Completed(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_failed() {
+        let inst = make_instance_with_status("sub-2", WorkflowInstanceStatus::Failed);
+        let (pm, _dispatcher) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-2", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Failed(_, _)));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_running() {
+        let inst = make_instance_with_status("sub-3", WorkflowInstanceStatus::Running);
+        let (pm, _dispatcher) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-3", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_canceled() {
+        let inst = make_instance_with_status("sub-4", WorkflowInstanceStatus::Canceled);
+        let (pm, _dispatcher) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-4", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Failed(_, _)));
+
+    // ── resolve_child_status SubWorkflow paths ──
+
+    fn subw_template() -> TaskTemplate {
+        TaskTemplate::SubWorkflow(crate::task::entity::task_definition::SubWorkflowTemplate {
+            workflow_meta_id: "m1".into(), workflow_version: 1, form: vec![], timeout: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_not_found() {
+        let (pm, _) = make_pm(vec![]);
+        let result = pm.resolve_child_status("no-such", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::NotFound));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_completed() {
+        let inst = make_instance_with_status("sub-1", WorkflowInstanceStatus::Completed);
+        let (pm, _) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-1", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Completed(_)));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_failed() {
+        let inst = make_instance_with_status("sub-2", WorkflowInstanceStatus::Failed);
+        let (pm, _) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-2", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Failed(_, _)));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_running() {
+        let inst = make_instance_with_status("sub-3", WorkflowInstanceStatus::Running);
+        let (pm, _) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-3", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Running));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_subw_canceled() {
+        let inst = make_instance_with_status("sub-4", WorkflowInstanceStatus::Canceled);
+        let (pm, _) = make_pm(vec![inst]);
+        let result = pm.resolve_child_status("sub-4", &subw_template()).await;
+        assert!(matches!(result, ChildStatus::Failed(_, _)));
+    }
     }
 }
