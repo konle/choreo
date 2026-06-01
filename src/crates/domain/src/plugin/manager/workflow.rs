@@ -69,7 +69,7 @@ enum CallbackReadiness {
 }
 
 /// Merged callback fields after optional enrichment from `task_instances`.
-struct CallbackPayload {
+pub(crate) struct CallbackPayload {
     status: NodeExecutionStatus,
     output: Option<serde_json::Value>,
     error_message: Option<String>,
