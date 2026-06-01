@@ -51,6 +51,14 @@ pub fn verify_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> 
     Ok(data.claims)
 }
 
+pub fn resolve_tenant_id(claims: &Claims, header_tenant_id: Option<&str>) -> String {
+    if claims.is_super_admin {
+        header_tenant_id.unwrap_or(&claims.tenant_id).to_string()
+    } else {
+        claims.tenant_id.clone()
+    }
+}
+
 pub async fn auth_middleware(
     mut req: Request,
     next: Next,
@@ -89,14 +97,11 @@ pub async fn auth_middleware(
         }
     };
 
-    let tenant_id = if claims.is_super_admin {
-        req.headers()
+    let tenant_id = {
+        let header_val = req.headers()
             .get("X-Tenant-Id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or(claims.tenant_id)
-    } else {
-        claims.tenant_id
+            .and_then(|v| v.to_str().ok());
+        resolve_tenant_id(&claims, header_val)
     };
 
     let ctx = AuthContext {
