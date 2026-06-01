@@ -404,7 +404,7 @@ mod integration_tests {
     async fn retry_container_child_running_instance_rollback_only() {
         let node = make_node_instance("n1", TaskType::Http, NodeExecutionStatus::Failed, None);
         let inst = make_instance_with_node("wf-1", WorkflowInstanceStatus::Running, "n1", node);
-        let (pm, dispatcher) = make_pm(vec![inst]);
+        let (pm, _dispatcher) = make_pm(vec![inst]);
         let result = pm
             .process_workflow_job(
                 ExecuteWorkflowJob {
@@ -419,5 +419,36 @@ mod integration_tests {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    // ── revive_from_failed dispatched jobs check ──
+
+    #[tokio::test]
+    async fn child_revived_failed_dispatches_child_revived_to_parent() {
+        use crate::shared::job::WorkflowCallerContext;
+        let node = make_node_instance("n1", TaskType::Http, NodeExecutionStatus::Failed, None);
+        let mut inst = make_instance_with_node("wf-1", WorkflowInstanceStatus::Failed, "n1", node);
+        inst.parent_context = Some(WorkflowCallerContext {
+            workflow_instance_id: "parent-wf".into(),
+            node_id: "parent-node".into(),
+            parent_task_instance_id: None,
+            item_index: None,
+        });
+        let (pm, dispatcher) = make_pm(vec![inst]);
+        pm.process_workflow_job(
+            ExecuteWorkflowJob {
+                workflow_instance_id: "wf-1".into(),
+                tenant_id: "t1".into(),
+                event: WorkflowEvent::ChildRevived {
+                    node_id: "n1".into(),
+                    child_id: "child-1".into(),
+                },
+            },
+            "worker-1",
+        )
+        .await
+        .unwrap();
+        let jobs = dispatcher.take_workflow_jobs();
+        assert_eq!(jobs.len(), 2); // ChildRevived to parent + Start to self
     }
 }
