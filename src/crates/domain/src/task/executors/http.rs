@@ -29,6 +29,14 @@ impl HttpTaskExecutor {
         }
     }
 
+    fn is_http_success(status_code: u16) -> bool {
+        (200..300).contains(&status_code)
+    }
+
+    fn should_retry(attempt: u32, retry_count: u32) -> bool {
+        attempt < retry_count
+    }
+
     fn build_request(
         client: &Client,
         url: &str,
@@ -189,7 +197,7 @@ impl TaskExecutor for HttpTaskExecutor {
                 Err(e) => {
                     warn!(task_instance_id = %tid, url = %url, attempt = attempt + 1, error = %e, "HTTP request failed");
                     last_error = Some(e);
-                    if attempt < config.retry_count {
+                    if Self::should_retry(attempt, config.retry_count) {
                         let delay = config.retry_delay as u64;
                         if delay > 0 {
                             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
@@ -199,7 +207,7 @@ impl TaskExecutor for HttpTaskExecutor {
                 }
             };
 
-            if !(200..300).contains(&resp.status_code) {
+            if !Self::is_http_success(resp.status_code) {
                 warn!(task_instance_id = %tid, url = %url, status_code = resp.status_code, attempt = attempt + 1, "HTTP task returned non-2xx status");
                 last_error = Some(format!("HTTP {}: {}", resp.status_code, resp.body));
             } else if let Some(ref condition) = config.success_condition {

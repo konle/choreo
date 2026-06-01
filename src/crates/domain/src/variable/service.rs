@@ -8,6 +8,17 @@ use crate::variable::repository::{RepositoryError, VariableRepository};
 
 const SECRET_MASK: &str = "******";
 
+pub fn merge_json_into_map(
+    map: &mut serde_json::Map<String, JsonValue>,
+    source: &JsonValue,
+) {
+    if let Some(obj) = source.as_object() {
+        for (k, v) in obj {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct VariableService {
     pub repository: Arc<dyn VariableRepository>,
@@ -153,11 +164,7 @@ impl VariableService {
             }
         }
 
-        if let Some(obj) = node_context.as_object() {
-            for (k, v) in obj {
-                merged.insert(k.clone(), v.clone());
-            }
-        }
+        merge_json_into_map(&mut merged, node_context);
 
         Ok(JsonValue::Object(merged))
     }
@@ -180,11 +187,7 @@ impl VariableService {
             merged.insert(var.key, val);
         }
 
-        if let Some(obj) = user_context.as_object() {
-            for (k, v) in obj {
-                merged.insert(k.clone(), v.clone());
-            }
-        }
+        merge_json_into_map(&mut merged, user_context);
 
         Ok(JsonValue::Object(merged))
     }
@@ -330,5 +333,21 @@ mod tests {
     fn parse_json_invalid() {
         let result = parse_variable_value(&VariableType::Json, "not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_json_into_map_inserts_keys() {
+        let mut map = serde_json::Map::new();
+        merge_json_into_map(&mut map, &serde_json::json!({"a": 1, "b": "x"}));
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["a"], serde_json::json!(1));
+        assert_eq!(map["b"], serde_json::json!("x"));
+    }
+
+    #[test]
+    fn merge_json_into_map_non_object_noop() {
+        let mut map = serde_json::Map::new();
+        merge_json_into_map(&mut map, &serde_json::json!("not_an_object"));
+        assert!(map.is_empty());
     }
 }

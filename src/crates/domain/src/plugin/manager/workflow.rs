@@ -90,6 +90,15 @@ fn child_task_status_to_node_status(
     }
 }
 
+fn is_container_node(
+    node: &crate::workflow::entity::workflow_definition::WorkflowNodeInstanceEntity,
+) -> bool {
+    matches!(
+        node.node_type,
+        crate::shared::workflow::TaskType::Parallel | crate::shared::workflow::TaskType::ForkJoin
+    )
+}
+
 impl PluginManager {
     pub async fn process_workflow_job(
         &self,
