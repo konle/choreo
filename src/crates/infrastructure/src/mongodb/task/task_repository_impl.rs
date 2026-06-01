@@ -38,14 +38,14 @@ impl TaskRepositoryImpl {
 impl TaskInstanceRepositoryImpl {
     // 避免排序注入
     const ALLOWED_SORT_FIELDS: &[&str] = &["created_at", "updated_at", "status", "task_id"];
-    pub fn new(client: Client) -> Self {
-        let database = client.database("workflow");
-        let collection = database.collection("task_instances");
-        Self {
-            client,
-            database,
-            collection,
+    fn validate_sort_field(field: &str) -> Result<(), RepositoryError> {
+        if !Self::ALLOWED_SORT_FIELDS.contains(&field) {
+            return Err(format!("invalid sort field: {}", field).into());
         }
+        Ok(())
+    }
+    fn normalize_sort_order(sort_order: &str) -> i32 {
+        if sort_order == "asc" { 1 } else { -1 }
     }
 
     fn build_filter(&self, query: &TaskInstanceQuery) -> Document {
@@ -60,11 +60,15 @@ impl TaskInstanceRepositoryImpl {
         }
         filter
     }
-    fn validate_sort_field(field: &str) -> Result<(), RepositoryError> {
-        if !Self::ALLOWED_SORT_FIELDS.contains(&field) {
-            return Err(format!("invalid sort field: {}", field).into());
+
+    pub fn new(client: Client) -> Self {
+        let database = client.database("workflow");
+        let collection = database.collection("task_instances");
+        Self {
+            client,
+            database,
+            collection,
         }
-        Ok(())
     }
 }
 
