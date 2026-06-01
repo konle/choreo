@@ -3,6 +3,8 @@
 
 mod apply_exec;
 mod ensure_task_job;
+#[cfg(test)]
+mod integration_tests;
 mod loop_action;
 mod workflow;
 
