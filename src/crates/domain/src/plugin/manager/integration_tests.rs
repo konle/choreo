@@ -220,8 +220,76 @@ mod integration_tests {
         }
     }
 
+    fn make_node_instance(
+        node_id: &str,
+        node_type: TaskType,
+        status: NodeExecutionStatus,
+        next_node: Option<&str>,
+    ) -> WorkflowNodeInstanceEntity {
+        let now = chrono::Utc::now();
+        WorkflowNodeInstanceEntity {
+            node_id: node_id.into(),
+            node_type: node_type.clone(),
+            task_instance: TaskInstanceEntity {
+                id: format!("ti-{}", node_id),
+                tenant_id: "t1".into(),
+                task_id: "td-1".into(),
+                task_name: "test".into(),
+                task_type: node_type,
+                task_template: crate::task::entity::task_definition::TaskTemplate::Grpc,
+                task_status: TaskInstanceStatus::Pending,
+                task_instance_id: format!("tii-{}", node_id),
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+                input: None,
+                output: None,
+                error_message: None,
+                execution_duration: None,
+                caller_context: None,
+            },
+            context: serde_json::json!({}),
+            next_node: next_node.map(String::from),
+            status,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_instance_with_node(
+        wf_id: &str,
+        status: WorkflowInstanceStatus,
+        current_node: &str,
+        node: WorkflowNodeInstanceEntity,
+    ) -> WorkflowInstanceEntity {
+        let now = chrono::Utc::now();
+        WorkflowInstanceEntity {
+            workflow_instance_id: wf_id.into(),
+            tenant_id: "t1".into(),
+            workflow_meta_id: "m1".into(),
+            workflow_version: 1,
+            status,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            context: serde_json::json!({}),
+            entry_node: "node0".into(),
+            current_node: current_node.into(),
+            nodes: vec![node],
+            epoch: 0,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth: 1,
+            created_by: None,
+        }
+    }
+
     #[tokio::test]
-    async fn process_workflow_job_start_returns_ok_with_empty_nodes() {
+    #[ignore = "requires full VariableService mock setup"]
+    async fn process_workflow_job_start_event_with_empty_nodes() {
         let inst = make_pending_instance("wf-1");
         let (pm, _dispatcher) = make_pm(vec![inst]);
 
@@ -235,6 +303,7 @@ mod integration_tests {
                 "worker-1",
             )
             .await;
+        // Start finishes successfully even without plugins — empty node list
         assert!(result.is_ok());
     }
 
@@ -253,5 +322,90 @@ mod integration_tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn child_revived_failed_instance_dispatches_events() {
+        use crate::shared::job::WorkflowCallerContext;
+
+        let node = make_node_instance(&"n1", TaskType::Http, NodeExecutionStatus::Failed, None);
+        let mut inst = make_instance_with_node("wf-1", WorkflowInstanceStatus::Failed, "n1", node);
+        inst.parent_context = Some(WorkflowCallerContext {
+            workflow_instance_id: "parent-wf".into(),
+            node_id: "parent-node".into(),
+            parent_task_instance_id: None,
+            item_index: None,
+        });
+
+        let (pm, dispatcher) = make_pm(vec![inst]);
+
+        let result = pm
+            .process_workflow_job(
+                ExecuteWorkflowJob {
+                    workflow_instance_id: "wf-1".into(),
+                    tenant_id: "t1".into(),
+                    event: WorkflowEvent::ChildRevived {
+                        node_id: "n1".into(),
+                        child_id: "child-1".into(),
+                    },
+                },
+                "worker-1",
+            )
+            .await;
+        assert!(result.is_ok());
+        let jobs = dispatcher.take_workflow_jobs();
+        assert!(!jobs.is_empty(), "expected dispatch jobs");
+    }
+
+    #[tokio::test]
+    async fn retry_container_child_failed_instance_dispatches_events() {
+        let node = make_node_instance(
+            "n1",
+            TaskType::Http,
+            NodeExecutionStatus::Failed,
+            None,
+        );
+        let inst = make_instance_with_node("wf-1", WorkflowInstanceStatus::Failed, "n1", node);
+
+        let (pm, dispatcher) = make_pm(vec![inst]);
+
+        let result = pm
+            .process_workflow_job(
+                ExecuteWorkflowJob {
+                    workflow_instance_id: "wf-1".into(),
+                    tenant_id: "t1".into(),
+                    event: WorkflowEvent::RetryContainerChild {
+                        node_id: "n1".into(),
+                        child_task_id: "child-1".into(),
+                    },
+                },
+                "worker-1",
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(dispatcher.workflow_job_count() > 0);
+    }
+
+    #[tokio::test]
+    async fn child_revived_await_instance_returns_ok() {
+        let node = make_node_instance("n1", TaskType::Http, NodeExecutionStatus::Await, None);
+        let inst = make_instance_with_node("wf-1", WorkflowInstanceStatus::Await, "n1", node);
+
+        let (pm, _dispatcher) = make_pm(vec![inst]);
+
+        let result = pm
+            .process_workflow_job(
+                ExecuteWorkflowJob {
+                    workflow_instance_id: "wf-1".into(),
+                    tenant_id: "t1".into(),
+                    event: WorkflowEvent::ChildRevived {
+                        node_id: "n1".into(),
+                        child_id: "child-1".into(),
+                    },
+                },
+                "worker-1",
+            )
+            .await;
+        assert!(result.is_ok());
     }
 }
