@@ -76,6 +76,20 @@ struct CallbackPayload {
     input: Option<serde_json::Value>,
 }
 
+fn child_task_status_to_node_status(
+    status: &crate::shared::workflow::TaskInstanceStatus,
+) -> Option<crate::workflow::entity::workflow_definition::NodeExecutionStatus> {
+    match status {
+        crate::shared::workflow::TaskInstanceStatus::Completed => {
+            Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success)
+        }
+        crate::shared::workflow::TaskInstanceStatus::Failed => {
+            Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed)
+        }
+        _ => None,
+    }
+}
+
 impl PluginManager {
     pub async fn process_workflow_job(
         &self,
@@ -531,16 +545,7 @@ impl PluginManager {
             None => None,
         };
         if let Some(child) = child_result {
-            use crate::shared::workflow::TaskInstanceStatus;
-            let terminal_status = match child.task_status {
-                TaskInstanceStatus::Completed => {
-                    Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success)
-                }
-                TaskInstanceStatus::Failed => {
-                    Some(crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed)
-                }
-                _ => None,
-            };
+            let terminal_status = child_task_status_to_node_status(&child.task_status);
 
             if let Some(status) = terminal_status {
                 info!(
@@ -1228,5 +1233,24 @@ mod tests {
 
         // Callback targeting node_6, current_node is node_6 → should be accepted
         assert_eq!("node_6", instance.get_current_node());
+    }
+
+    #[test]
+    fn child_task_status_to_node_status_completed() {
+        use crate::shared::workflow::TaskInstanceStatus;
+        assert_eq!(child_task_status_to_node_status(&TaskInstanceStatus::Completed), Some(NodeExecutionStatus::Success));
+    }
+
+    #[test]
+    fn child_task_status_to_node_status_failed() {
+        use crate::shared::workflow::TaskInstanceStatus;
+        assert_eq!(child_task_status_to_node_status(&TaskInstanceStatus::Failed), Some(NodeExecutionStatus::Failed));
+    }
+
+    #[test]
+    fn child_task_status_to_node_status_non_terminal() {
+        use crate::shared::workflow::TaskInstanceStatus;
+        assert_eq!(child_task_status_to_node_status(&TaskInstanceStatus::Pending), None);
+        assert_eq!(child_task_status_to_node_status(&TaskInstanceStatus::Running), None);
     }
 }

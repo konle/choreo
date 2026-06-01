@@ -29,20 +29,20 @@ impl HttpTaskExecutor {
         }
     }
 
-    async fn send_request(
-        &self,
+    fn build_request(
+        client: &Client,
         url: &str,
         method: &HttpMethod,
         headers_obj: &serde_json::Map<String, serde_json::Value>,
         body_json: &Option<serde_json::Value>,
         timeout_secs: u32,
-    ) -> Result<HttpResponse, String> {
+    ) -> reqwest::RequestBuilder {
         let mut request = match method {
-            HttpMethod::Get => self.client.get(url),
-            HttpMethod::Post => self.client.post(url),
-            HttpMethod::Put => self.client.put(url),
-            HttpMethod::Delete => self.client.delete(url),
-            HttpMethod::Head => self.client.head(url),
+            HttpMethod::Get => client.get(url),
+            HttpMethod::Post => client.post(url),
+            HttpMethod::Put => client.put(url),
+            HttpMethod::Delete => client.delete(url),
+            HttpMethod::Head => client.head(url),
         };
 
         for (hk, hv) in headers_obj {
@@ -64,6 +64,19 @@ impl HttpTaskExecutor {
             request = request.timeout(std::time::Duration::from_secs(timeout_secs as u64));
         }
 
+        request
+    }
+
+    async fn send_request(
+        &self,
+        url: &str,
+        method: &HttpMethod,
+        headers_obj: &serde_json::Map<String, serde_json::Value>,
+        body_json: &Option<serde_json::Value>,
+        timeout_secs: u32,
+    ) -> Result<HttpResponse, String> {
+        let request = Self::build_request(&self.client, url, method, headers_obj, body_json, timeout_secs);
+
         let start = Utc::now();
         let resp = request.send().await.map_err(|e| e.to_string())?;
         let status_code = resp.status().as_u16();
@@ -75,6 +88,15 @@ impl HttpTaskExecutor {
             body,
             duration_ms,
         })
+    }
+
+    fn evaluate_condition(body_val: &serde_json::Value, condition: &str) -> Result<bool, String> {
+        let engine = rhai_engine::create_engine();
+        let mut scope = Scope::new();
+        rhai_engine::inject_context_flat(&mut scope, body_val);
+        engine
+            .eval_with_scope::<bool>(&mut scope, condition)
+            .map_err(|e| e.to_string())
     }
 
     fn evaluate_success_condition(
@@ -94,10 +116,7 @@ impl HttpTaskExecutor {
             }
         };
 
-        let engine = rhai_engine::create_engine();
-        let mut scope = Scope::new();
-        rhai_engine::inject_context_flat(&mut scope, &body_val);
-        match engine.eval_with_scope::<bool>(&mut scope, condition) {
+        match Self::evaluate_condition(&body_val, condition) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -247,5 +266,28 @@ impl TaskExecutor for HttpTaskExecutor {
 
     fn task_type(&self) -> TaskType {
         TaskType::Http
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluate_condition_true() {
+        let body = serde_json::json!({"status": "ok"});
+        assert!(HttpTaskExecutor::evaluate_condition(&body, "status == \"ok\"").unwrap());
+    }
+
+    #[test]
+    fn evaluate_condition_false() {
+        let body = serde_json::json!({"status": "err"});
+        assert!(!HttpTaskExecutor::evaluate_condition(&body, "status == \"ok\"").unwrap());
+    }
+
+    #[test]
+    fn evaluate_condition_error() {
+        let body = serde_json::json!({});
+        assert!(HttpTaskExecutor::evaluate_condition(&body, "unknown_var > 0").is_err());
     }
 }
