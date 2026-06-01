@@ -78,6 +78,15 @@ fn build_outbound_for_task(
     })
 }
 
+fn exec_status_to_task_instance_status(
+    status: &NodeExecutionStatus,
+) -> domain::shared::workflow::TaskInstanceStatus {
+    match status {
+        NodeExecutionStatus::Success => domain::shared::workflow::TaskInstanceStatus::Completed,
+        _ => domain::shared::workflow::TaskInstanceStatus::Failed,
+    }
+}
+
 async fn handle_task_job(
     job: ExecuteTaskJob,
     ctx: Data<(Arc<PluginManager>, Arc<TaskManager>)>,
@@ -144,30 +153,33 @@ async fn handle_task_job(
     let execution_duration = start.elapsed().as_millis() as u64;
 
     // Determine new task status
-    let new_task_status = match exec_result.status {
-        NodeExecutionStatus::Success => {
-            if let Err(e) = task_svc
-                .complete_with_output(
-                    &job.task_instance_id,
-                    exec_result.output.clone(),
-                    exec_result.input.clone(),
-                    Some(execution_duration),
-                )
-                .await
-            {
-                warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
+    let new_task_status = {
+        let status = exec_status_to_task_instance_status(&exec_result.status);
+        match status {
+            domain::shared::workflow::TaskInstanceStatus::Completed => {
+                if let Err(e) = task_svc
+                    .complete_with_output(
+                        &job.task_instance_id,
+                        exec_result.output.clone(),
+                        exec_result.input.clone(),
+                        Some(execution_duration),
+                    )
+                    .await
+                {
+                    warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
+                }
+                domain::shared::workflow::TaskInstanceStatus::Completed
             }
-            domain::shared::workflow::TaskInstanceStatus::Completed
-        }
-        _ => {
-            let error_msg = exec_result.error_message.clone().unwrap_or_default();
-            if let Err(e) = task_svc
-                .fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration))
-                .await
-            {
-                warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
+            _ => {
+                let error_msg = exec_result.error_message.clone().unwrap_or_default();
+                if let Err(e) = task_svc
+                    .fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration))
+                    .await
+                {
+                    warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
+                }
+                domain::shared::workflow::TaskInstanceStatus::Failed
             }
-            domain::shared::workflow::TaskInstanceStatus::Failed
         }
     };
 

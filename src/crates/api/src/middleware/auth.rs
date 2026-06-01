@@ -115,3 +115,38 @@ pub async fn auth_middleware(
     req.extensions_mut().insert(ctx);
     Ok(next.run(req).await)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_claims(super_admin: bool, tenant_id: &str) -> Claims {
+        Claims {
+            sub: "u1".into(),
+            username: "test".into(),
+            is_super_admin: super_admin,
+            tenant_id: tenant_id.into(),
+            role: "Developer".into(),
+            exp: 9999999999,
+        }
+    }
+
+    #[test]
+    fn resolve_tenant_id_normal_user() {
+        let claims = make_claims(false, "tenant-a");
+        assert_eq!(resolve_tenant_id(&claims, None), "tenant-a");
+        assert_eq!(resolve_tenant_id(&claims, Some("other")), "tenant-a");
+    }
+
+    #[test]
+    fn resolve_tenant_id_super_admin_with_header() {
+        let claims = make_claims(true, "tenant-a");
+        assert_eq!(resolve_tenant_id(&claims, Some("tenant-b")), "tenant-b");
+    }
+
+    #[test]
+    fn resolve_tenant_id_super_admin_no_header() {
+        let claims = make_claims(true, "tenant-a");
+        assert_eq!(resolve_tenant_id(&claims, None), "tenant-a");
+    }
+}
