@@ -158,12 +158,7 @@ impl VariableService {
             merged.insert(var.key, val);
         }
 
-        if let Some(obj) = instance_context.as_object() {
-            for (k, v) in obj {
-                merged.insert(k.clone(), v.clone());
-            }
-        }
-
+        merge_json_into_map(&mut merged, instance_context);
         merge_json_into_map(&mut merged, node_context);
 
         Ok(JsonValue::Object(merged))
