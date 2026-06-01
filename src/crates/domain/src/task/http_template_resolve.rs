@@ -533,4 +533,209 @@ mod tests {
         );
         assert_eq!(snap["base_url"], json!("http://192.168.50.18:11434/v1"));
     }
+
+    // ── resolve_form_to_json unit tests ──
+
+    #[test]
+    fn rftj_variable_substitutes() {
+        let f = form("k", FormValue::String("{{a}}".into()), FormValueType::Variable);
+        let out = resolve_form_to_json(&f, &json!({"a": "v"}));
+        assert_eq!(out, "v");
+    }
+
+    #[test]
+    fn rftj_variable_non_string_null() {
+        let f = form("k", FormValue::Number(1.0), FormValueType::Variable);
+        let out = resolve_form_to_json(&f, &json!({}));
+        assert_eq!(out, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn rftj_string_literal() {
+        let f = form("k", FormValue::String("hi".into()), FormValueType::String);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), "hi");
+    }
+
+    #[test]
+    fn rftj_string_from_number() {
+        let f = form("k", FormValue::Number(3.14), FormValueType::String);
+        assert_eq!(
+            resolve_form_to_json(&f, &json!({})),
+            serde_json::json!(3.14)
+        );
+    }
+
+    #[test]
+    fn rftj_string_from_bool() {
+        let f = form("k", FormValue::Bool(true), FormValueType::String);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn rftj_string_from_json() {
+        let j = serde_json::json!({"x": 1});
+        let f = form("k", FormValue::Json(j.clone()), FormValueType::String);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), j);
+    }
+
+    #[test]
+    fn rftj_number_from_number() {
+        let f = form("k", FormValue::Number(42.0), FormValueType::Number);
+        assert_eq!(
+            resolve_form_to_json(&f, &json!({})),
+            serde_json::json!(42.0)
+        );
+    }
+
+    #[test]
+    fn rftj_number_from_parsable_string() {
+        let f = form("k", FormValue::String("3.14".into()), FormValueType::Number);
+        assert_eq!(
+            resolve_form_to_json(&f, &json!({})),
+            serde_json::json!(3.14)
+        );
+    }
+
+    #[test]
+    fn rftj_number_from_unparsable_string() {
+        let f = form("k", FormValue::String("abc".into()), FormValueType::Number);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), "abc");
+    }
+
+    #[test]
+    fn rftj_number_default_null() {
+        let f = form("k", FormValue::Bool(true), FormValueType::Number);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn rftj_bool_from_bool() {
+        let f = form("k", FormValue::Bool(false), FormValueType::Bool);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn rftj_bool_from_string() {
+        let f = form("k", FormValue::String("yes".into()), FormValueType::Bool);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), "yes");
+    }
+
+    #[test]
+    fn rftj_bool_default_null() {
+        let f = form("k", FormValue::Number(0.0), FormValueType::Bool);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn rftj_json_from_json() {
+        let j = serde_json::json!({"a": 1});
+        let f = form("k", FormValue::Json(j.clone()), FormValueType::Json);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), j);
+    }
+
+    #[test]
+    fn rftj_json_from_string() {
+        let f = form("k", FormValue::String("text".into()), FormValueType::Json);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), "text");
+    }
+
+    #[test]
+    fn rftj_json_default_null() {
+        let f = form("k", FormValue::Number(1.0), FormValueType::Json);
+        assert_eq!(resolve_form_to_json(&f, &json!({})), serde_json::Value::Null);
+    }
+
+    // ── parse_method_str ──
+
+    #[test]
+    fn parse_method_post() {
+        assert_eq!(parse_method_str("POST"), HttpMethod::Post);
+    }
+
+    #[test]
+    fn parse_method_put() {
+        assert_eq!(parse_method_str("put"), HttpMethod::Put);
+    }
+
+    #[test]
+    fn parse_method_delete() {
+        assert_eq!(parse_method_str("DELETE"), HttpMethod::Delete);
+    }
+
+    #[test]
+    fn parse_method_head() {
+        assert_eq!(parse_method_str("Head"), HttpMethod::Head);
+    }
+
+    #[test]
+    fn parse_method_default_get() {
+        assert_eq!(parse_method_str("unknown"), HttpMethod::Get);
+        assert_eq!(parse_method_str(""), HttpMethod::Get);
+    }
+
+    // ── effective_http_request ──
+
+    fn make_task_instance(input: Option<serde_json::Value>) -> crate::task::entity::task_definition::TaskInstanceEntity {
+        let now = chrono::Utc::now();
+        crate::task::entity::task_definition::TaskInstanceEntity {
+            id: "ti-1".into(),
+            tenant_id: "t1".into(),
+            task_id: "td-1".into(),
+            task_name: "test".into(),
+            task_type: crate::shared::workflow::TaskType::Http,
+            task_template: crate::task::entity::task_definition::TaskTemplate::Http(dummy_tpl()),
+            task_status: crate::shared::workflow::TaskInstanceStatus::Pending,
+            task_instance_id: "tii-1".into(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            input,
+            output: None,
+            error_message: None,
+            execution_duration: None,
+            caller_context: None,
+        }
+    }
+
+    fn dummy_tpl() -> TaskHttpTemplate {
+        TaskHttpTemplate {
+            url: "http://example.com/api".into(),
+            method: HttpMethod::Post,
+            headers: vec![],
+            body: vec![],
+            form: vec![],
+            retry_count: 0,
+            retry_delay: 0,
+            timeout: 10,
+            success_condition: None,
+        }
+    }
+
+    #[test]
+    fn effective_request_uses_resolved_input() {
+        let ti = make_task_instance(Some(json!({"url": "http://resolved.com/x", "method": "GET"})));
+        let (snapshot, url, method, _headers, _body) =
+            effective_http_request(&ti, &dummy_tpl(), &json!({}));
+        assert_eq!(url, "http://resolved.com/x");
+        assert_eq!(method, HttpMethod::Get);
+        assert_eq!(snapshot["url"], "http://resolved.com/x");
+    }
+
+    #[test]
+    fn effective_request_falls_back_to_template() {
+        let ti = make_task_instance(None);
+        let (snapshot, url, method, _headers, _body) =
+            effective_http_request(&ti, &dummy_tpl(), &json!({"fallback": true}));
+        assert_eq!(url, "http://example.com/api");
+        assert_eq!(method, HttpMethod::Post);
+        assert!(snapshot.is_object());
+    }
+
+    #[test]
+    fn effective_request_falls_back_when_url_empty() {
+        let ti = make_task_instance(Some(json!({"url": ""})));
+        let (_, url, _, _, _) =
+            effective_http_request(&ti, &dummy_tpl(), &json!({}));
+        assert_eq!(url, "http://example.com/api");
+    }
 }

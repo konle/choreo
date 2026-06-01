@@ -15,6 +15,52 @@ pub struct ApprovalService {
     pub role_repository: Arc<dyn UserTenantRoleRepository>,
 }
 
+pub fn evaluate_approval_mode(
+    mode: &ApprovalMode,
+    total_approvers: usize,
+    decisions: &[ApprovalDecision],
+) -> Option<ApprovalStatus> {
+    let approves = decisions
+        .iter()
+        .filter(|d| d.decision == Decision::Approve)
+        .count();
+    let rejects = decisions
+        .iter()
+        .filter(|d| d.decision == Decision::Reject)
+        .count();
+
+    match mode {
+        ApprovalMode::Any => {
+            if approves >= 1 {
+                Some(ApprovalStatus::Approved)
+            } else if rejects >= 1 {
+                Some(ApprovalStatus::Rejected)
+            } else {
+                None
+            }
+        }
+        ApprovalMode::All => {
+            if rejects >= 1 {
+                Some(ApprovalStatus::Rejected)
+            } else if approves == total_approvers {
+                Some(ApprovalStatus::Approved)
+            } else {
+                None
+            }
+        }
+        ApprovalMode::Majority => {
+            let threshold = total_approvers / 2 + 1;
+            if approves >= threshold {
+                Some(ApprovalStatus::Approved)
+            } else if rejects >= threshold {
+                Some(ApprovalStatus::Rejected)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 impl ApprovalService {
     pub fn new(
         repository: Arc<dyn ApprovalRepository>,
@@ -148,48 +194,7 @@ impl ApprovalService {
     }
 
     fn evaluate_mode(&self, entity: &ApprovalInstanceEntity) -> Option<ApprovalStatus> {
-        let total = entity.approvers.len();
-        let approves = entity
-            .decisions
-            .iter()
-            .filter(|d| d.decision == Decision::Approve)
-            .count();
-        let rejects = entity
-            .decisions
-            .iter()
-            .filter(|d| d.decision == Decision::Reject)
-            .count();
-
-        match entity.approval_mode {
-            ApprovalMode::Any => {
-                if approves >= 1 {
-                    Some(ApprovalStatus::Approved)
-                } else if rejects >= 1 {
-                    Some(ApprovalStatus::Rejected)
-                } else {
-                    None
-                }
-            }
-            ApprovalMode::All => {
-                if rejects >= 1 {
-                    Some(ApprovalStatus::Rejected)
-                } else if approves == total {
-                    Some(ApprovalStatus::Approved)
-                } else {
-                    None
-                }
-            }
-            ApprovalMode::Majority => {
-                let threshold = total / 2 + 1;
-                if approves >= threshold {
-                    Some(ApprovalStatus::Approved)
-                } else if rejects >= threshold {
-                    Some(ApprovalStatus::Rejected)
-                } else {
-                    None
-                }
-            }
-        }
+        evaluate_approval_mode(&entity.approval_mode, entity.approvers.len(), &entity.decisions)
     }
 
     async fn resolve_approvers(
@@ -261,5 +266,122 @@ impl ApprovalService {
         expired.status = ApprovalStatus::Rejected;
         expired.updated_at = Utc::now();
         self.repository.update(&expired).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::entity::ApprovalDecision;
+    use crate::task::entity::task_definition::ApprovalMode;
+    use chrono::Utc;
+
+    fn make_decision(user: &str, decision: Decision) -> ApprovalDecision {
+        ApprovalDecision {
+            user_id: user.into(),
+            decision,
+            comment: None,
+            decided_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn any_mode_first_approve_wins() {
+        let decisions = vec![make_decision("u1", Decision::Approve)];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Any, 3, &decisions),
+            Some(ApprovalStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn any_mode_first_reject_wins() {
+        let decisions = vec![make_decision("u1", Decision::Reject)];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Any, 3, &decisions),
+            Some(ApprovalStatus::Rejected)
+        );
+    }
+
+    #[test]
+    fn any_mode_no_decisions() {
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Any, 3, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn all_mode_reject_ends() {
+        let decisions = vec![
+            make_decision("u1", Decision::Approve),
+            make_decision("u2", Decision::Reject),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::All, 3, &decisions),
+            Some(ApprovalStatus::Rejected)
+        );
+    }
+
+    #[test]
+    fn all_mode_all_approve() {
+        let decisions = vec![
+            make_decision("u1", Decision::Approve),
+            make_decision("u2", Decision::Approve),
+            make_decision("u3", Decision::Approve),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::All, 3, &decisions),
+            Some(ApprovalStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn all_mode_pending() {
+        let decisions = vec![
+            make_decision("u1", Decision::Approve),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::All, 3, &decisions),
+            None
+        );
+    }
+
+    #[test]
+    fn majority_approve_meets_threshold() {
+        let decisions = vec![
+            make_decision("u1", Decision::Approve),
+            make_decision("u2", Decision::Approve),
+            make_decision("u3", Decision::Approve),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Majority, 5, &decisions),
+            Some(ApprovalStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn majority_reject_meets_threshold() {
+        let decisions = vec![
+            make_decision("u1", Decision::Reject),
+            make_decision("u2", Decision::Reject),
+            make_decision("u3", Decision::Reject),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Majority, 5, &decisions),
+            Some(ApprovalStatus::Rejected)
+        );
+    }
+
+    #[test]
+    fn majority_pending() {
+        let decisions = vec![
+            make_decision("u1", Decision::Approve),
+            make_decision("u2", Decision::Reject),
+        ];
+        assert_eq!(
+            evaluate_approval_mode(&ApprovalMode::Majority, 5, &decisions),
+            None
+        );
     }
 }

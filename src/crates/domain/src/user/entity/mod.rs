@@ -88,3 +88,51 @@ pub struct UserTenantRole {
     pub role: TenantRole,
     pub created_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_str_valid() {
+        assert_eq!(TenantRole::from_str("TenantAdmin"), Some(TenantRole::TenantAdmin));
+        assert_eq!(TenantRole::from_str("Developer"), Some(TenantRole::Developer));
+        assert_eq!(TenantRole::from_str("Operator"), Some(TenantRole::Operator));
+        assert_eq!(TenantRole::from_str("Viewer"), Some(TenantRole::Viewer));
+    }
+
+    #[test]
+    fn from_str_invalid() {
+        assert_eq!(TenantRole::from_str("Admin"), None);
+        assert_eq!(TenantRole::from_str(""), None);
+    }
+
+    #[test]
+    fn has_permission_admin() {
+        let role = TenantRole::TenantAdmin;
+        assert!(!role.has_permission(&Permission::TenantManage));
+        assert!(role.has_permission(&Permission::UserManage));
+        assert!(role.has_permission(&Permission::TemplateWrite));
+        assert!(role.has_permission(&Permission::InstanceExecute));
+        assert!(role.has_permission(&Permission::ApprovalAdmin));
+        assert!(role.has_permission(&Permission::ApprovalDecide));
+        assert!(role.has_permission(&Permission::ReadOnly));
+    }
+
+    #[test]
+    fn has_permission_developer() {
+        let role = TenantRole::Developer;
+        assert!(role.has_permission(&Permission::TemplateWrite));
+        assert!(role.has_permission(&Permission::InstanceExecute));
+        assert!(!role.has_permission(&Permission::UserManage));
+        assert!(!role.has_permission(&Permission::ApprovalAdmin));
+    }
+
+    #[test]
+    fn has_permission_viewer() {
+        let role = TenantRole::Viewer;
+        assert!(role.has_permission(&Permission::ReadOnly));
+        assert!(!role.has_permission(&Permission::TemplateWrite));
+        assert!(!role.has_permission(&Permission::InstanceExecute));
+    }
+}

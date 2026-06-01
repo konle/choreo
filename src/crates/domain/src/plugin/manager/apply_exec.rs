@@ -16,19 +16,16 @@ use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, Workflow
 use tracing::{error, warn};
 
 impl PluginManager {
-    pub(super) async fn apply_exec_result(
-        &self,
+    fn determine_loop_action(
         instance: &mut WorkflowInstanceEntity,
         node_index: usize,
-        exec_result: ExecutionResult,
-    ) -> anyhow::Result<LoopAction> {
-        instance.nodes[node_index].status = exec_result.status.clone();
-        let old_status = instance.status.clone();
-        let action = match exec_result.status {
+        exec_result: &ExecutionResult,
+    ) -> LoopAction {
+        match exec_result.status {
             NodeExecutionStatus::Success | NodeExecutionStatus::Skipped => {
-                if let Some(jump_to_node) = exec_result.jump_to_node {
+                if let Some(ref jump_to_node) = exec_result.jump_to_node {
                     instance.current_node = jump_to_node.clone();
-                    instance.nodes[node_index].next_node = Some(jump_to_node);
+                    instance.nodes[node_index].next_node = Some(jump_to_node.clone());
                     LoopAction::Advance
                 } else if let Some(next) = instance.nodes[node_index].next_node.clone() {
                     instance.current_node = next;
@@ -51,7 +48,18 @@ impl PluginManager {
                 LoopAction::Done
             }
             _ => LoopAction::Retry,
-        };
+        }
+    }
+
+    pub(super) async fn apply_exec_result(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_index: usize,
+        exec_result: ExecutionResult,
+    ) -> anyhow::Result<LoopAction> {
+        instance.nodes[node_index].status = exec_result.status.clone();
+        let old_status = instance.status.clone();
+        let action = Self::determine_loop_action(instance, node_index, &exec_result);
 
         instance.updated_at = chrono::Utc::now();
         self.save_instance_and_bump_epoch(instance).await?;
@@ -183,5 +191,163 @@ impl PluginManager {
         instance.epoch += 1;
         instance.updated_at = chrono::Utc::now();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::interface::ExecutionResult;
+    use crate::shared::workflow::{TaskType, WorkflowInstanceStatus};
+    use crate::task::entity::task_definition::{TaskInstanceEntity, TaskTemplate};
+    use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity};
+    use chrono::Utc;
+
+    fn make_exec_result(status: NodeExecutionStatus, jump_to_node: Option<String>) -> ExecutionResult {
+        ExecutionResult {
+            status,
+            dispatch_jobs: vec![],
+            dispatch_workflow_jobs: vec![],
+            jump_to_node,
+        }
+    }
+
+    fn make_node(node_id: &str, next_node: Option<&str>) -> WorkflowNodeInstanceEntity {
+        let now = Utc::now();
+        WorkflowNodeInstanceEntity {
+            node_id: node_id.into(),
+            node_type: TaskType::Http,
+            task_instance: TaskInstanceEntity {
+                id: format!("task-{}", node_id),
+                tenant_id: "t1".into(),
+                task_id: "http-def".into(),
+                task_name: "test".into(),
+                task_type: TaskType::Http,
+                task_template: TaskTemplate::Grpc,
+                task_status: crate::shared::workflow::TaskInstanceStatus::Pending,
+                task_instance_id: format!("task-inst-{}", node_id),
+                created_at: now,
+                updated_at: now,
+                deleted_at: None,
+                input: None,
+                output: None,
+                error_message: None,
+                execution_duration: None,
+                caller_context: None,
+            },
+            context: serde_json::json!({}),
+            next_node: next_node.map(String::from),
+            status: NodeExecutionStatus::Pending,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_instance(status: WorkflowInstanceStatus, nodes: Vec<WorkflowNodeInstanceEntity>) -> WorkflowInstanceEntity {
+        let now = Utc::now();
+        WorkflowInstanceEntity {
+            workflow_instance_id: "wf-1".into(),
+            tenant_id: "t1".into(),
+            workflow_meta_id: "m1".into(),
+            workflow_version: 1,
+            status,
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            context: serde_json::json!({}),
+            entry_node: "node0".into(),
+            current_node: "node0".into(),
+            nodes,
+            epoch: 0,
+            locked_by: None,
+            locked_duration: None,
+            locked_at: None,
+            parent_context: None,
+            depth: 1,
+            created_by: None,
+        }
+    }
+
+    #[test]
+    fn test_determine_loop_action_success_jump_to() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Success, Some("node3".into()));
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Advance);
+        assert_eq!(instance.current_node, "node3");
+        assert_eq!(instance.nodes[0].next_node.as_deref(), Some("node3"));
+    }
+
+    #[test]
+    fn test_determine_loop_action_success_next_node() {
+        let node = make_node("node0", Some("node1"));
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Success, None);
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Advance);
+        assert_eq!(instance.current_node, "node1");
+    }
+
+    #[test]
+    fn test_determine_loop_action_success_no_next() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Success, None);
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Done);
+        assert_eq!(instance.status, WorkflowInstanceStatus::Completed);
+    }
+
+    #[test]
+    fn test_determine_loop_action_failed() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Failed, None);
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Done);
+        assert_eq!(instance.status, WorkflowInstanceStatus::Failed);
+    }
+
+    #[test]
+    fn test_determine_loop_action_await() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Await, None);
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Done);
+        assert_eq!(instance.status, WorkflowInstanceStatus::Await);
+    }
+
+    #[test]
+    fn test_determine_loop_action_pending_and_suspended() {
+        for s in [NodeExecutionStatus::Pending, NodeExecutionStatus::Suspended] {
+            let node = make_node("node0", None);
+            let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+            let result = make_exec_result(s, None);
+            let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+            assert_eq!(action, LoopAction::Done);
+            assert_eq!(instance.status, WorkflowInstanceStatus::Suspended);
+        }
+    }
+
+    #[test]
+    fn test_determine_loop_action_retry() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Running, None);
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Retry);
+    }
+
+    #[test]
+    fn test_determine_loop_action_skipped_jump_to() {
+        let node = make_node("node0", None);
+        let mut instance = make_instance(WorkflowInstanceStatus::Running, vec![node]);
+        let result = make_exec_result(NodeExecutionStatus::Skipped, Some("node5".into()));
+        let action = PluginManager::determine_loop_action(&mut instance, 0, &result);
+        assert_eq!(action, LoopAction::Advance);
+        assert_eq!(instance.current_node, "node5");
     }
 }

@@ -236,6 +236,11 @@ pub struct TaskEntity {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+    pub input: Option<JsonValue>,
+    pub output: Option<JsonValue>,
+    pub error_message: Option<String>,
+    pub execution_duration: Option<u64>,
+    pub caller_context: Option<WorkflowCallerContext>,
 }
 
 impl TaskEntity {
@@ -262,6 +267,11 @@ impl TaskEntity {
             created_at,
             updated_at,
             deleted_at,
+            input: None,
+            output: None,
+            error_message: None,
+            execution_duration: None,
+            caller_context: None,
         }
     }
 }
@@ -294,4 +304,23 @@ pub struct TaskInstanceEntity {
     pub error_message: Option<String>,
     pub execution_duration: Option<u64>, // 执行时间 单位：毫秒
     pub caller_context: Option<WorkflowCallerContext>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::workflow::TaskType;
+
+    #[test]
+    fn task_type_for_variants() {
+        assert_eq!(TaskTemplate::Grpc.task_type(), TaskType::Grpc);
+        assert_eq!(
+            TaskTemplate::Pause(PauseTemplate { wait_seconds: 0, mode: PauseMode::Manual }).task_type(),
+            TaskType::Pause
+        );
+        assert_eq!(
+            TaskTemplate::IfCondition(IfConditionTemplate { condition: "".into(), name: "".into(), then_task: None, else_task: None }).task_type(),
+            TaskType::IfCondition
+        );
+    }
 }

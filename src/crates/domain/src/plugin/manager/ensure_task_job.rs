@@ -10,6 +10,91 @@ use crate::workflow::entity::workflow_definition::WorkflowInstanceEntity;
 use tracing::warn;
 
 impl PluginManager {
+    fn resolve_http_child_input(
+        tpl: &crate::task::entity::task_definition::TaskHttpTemplate,
+        parent: &TaskInstanceEntity,
+        job: &ExecuteTaskJob,
+        parent_node_ctx: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        match &parent.task_template {
+            TaskTemplate::Parallel(pt) => {
+                let idx = job
+                    .caller_context
+                    .as_ref()
+                    .and_then(|c| c.item_index)
+                    .unwrap_or(0);
+                let ctx = crate::task::http_template_resolve::context_with_parallel_item(
+                    parent_node_ctx,
+                    &pt.items_path,
+                    &pt.item_alias,
+                    idx,
+                );
+                Some(crate::task::http_template_resolve::resolved_http_request_snapshot(tpl, &ctx))
+            }
+            TaskTemplate::ForkJoin(_) => Some(
+                crate::task::http_template_resolve::resolved_http_request_snapshot(
+                    tpl,
+                    parent_node_ctx,
+                ),
+            ),
+            TaskTemplate::Http(_) => {
+                let has_resolved_url = parent
+                    .input
+                    .as_ref()
+                    .and_then(|i| i.get("url"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                if has_resolved_url {
+                    parent.input.clone()
+                } else {
+                    Some(
+                        crate::task::http_template_resolve::resolved_http_request_snapshot(
+                            tpl,
+                            parent_node_ctx,
+                        ),
+                    )
+                }
+            }
+            _ => Some(
+                crate::task::http_template_resolve::resolved_http_request_snapshot(
+                    tpl,
+                    parent_node_ctx,
+                ),
+            ),
+        }
+    }
+
+    fn resolve_llm_child_input(
+        tpl: &crate::task::entity::task_definition::LlmTemplate,
+        parent: &TaskInstanceEntity,
+        job: &ExecuteTaskJob,
+        parent_node_ctx: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        if let TaskTemplate::Llm(_) = &parent.task_template {
+            if parent.input.is_some() {
+                return parent.input.clone();
+            }
+        }
+
+        let ctx = match &parent.task_template {
+            TaskTemplate::Parallel(pt) => {
+                let idx = job
+                    .caller_context
+                    .as_ref()
+                    .and_then(|c| c.item_index)
+                    .unwrap_or(0);
+                crate::task::http_template_resolve::context_with_parallel_item(
+                    parent_node_ctx,
+                    &pt.items_path,
+                    &pt.item_alias,
+                    idx,
+                )
+            }
+            _ => parent_node_ctx.clone(),
+        };
+        Some(super::workflow::resolved_llm_request_snapshot(tpl, &ctx))
+    }
+
     /// Derive the expected (child_template, child_task_type, child_task_id) for a dispatched
     /// job based on the parent node's template. Parallel/ForkJoin children use their inner
     /// template; all others inherit the parent's template as-is.
@@ -122,98 +207,263 @@ impl PluginManager {
         task_instance.execution_duration = None;
         task_instance.task_status = TaskInstanceStatus::Pending;
 
-        match &task_instance.task_template {
-            TaskTemplate::Http(tpl) => match &parent.task_template {
-                TaskTemplate::Parallel(pt) => {
-                    let idx = job
-                        .caller_context
-                        .as_ref()
-                        .and_then(|c| c.item_index)
-                        .unwrap_or(0);
-                    let ctx = crate::task::http_template_resolve::context_with_parallel_item(
-                        parent_node_ctx,
-                        &pt.items_path,
-                        &pt.item_alias,
-                        idx,
-                    );
-                    task_instance.input = Some(
-                        crate::task::http_template_resolve::resolved_http_request_snapshot(
-                            tpl, &ctx,
-                        ),
-                    );
-                }
-                TaskTemplate::ForkJoin(_) => {
-                    task_instance.input = Some(
-                        crate::task::http_template_resolve::resolved_http_request_snapshot(
-                            tpl,
-                            parent_node_ctx,
-                        ),
-                    );
-                }
-                TaskTemplate::Http(_) => {
-                    let has_resolved_url = parent
-                        .input
-                        .as_ref()
-                        .and_then(|i| i.get("url"))
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|s| !s.is_empty());
-                    task_instance.input = if has_resolved_url {
-                        parent.input.clone()
-                    } else {
-                        Some(
-                            crate::task::http_template_resolve::resolved_http_request_snapshot(
-                                tpl,
-                                parent_node_ctx,
-                            ),
-                        )
-                    };
-                }
-                _ => {
-                    task_instance.input = Some(
-                        crate::task::http_template_resolve::resolved_http_request_snapshot(
-                            tpl,
-                            parent_node_ctx,
-                        ),
-                    );
-                }
-            },
-            TaskTemplate::Llm(tpl) => {
-                let ctx = match &parent.task_template {
-                    TaskTemplate::Parallel(pt) => {
-                        let idx = job
-                            .caller_context
-                            .as_ref()
-                            .and_then(|c| c.item_index)
-                            .unwrap_or(0);
-                        crate::task::http_template_resolve::context_with_parallel_item(
-                            parent_node_ctx,
-                            &pt.items_path,
-                            &pt.item_alias,
-                            idx,
-                        )
-                    }
-                    TaskTemplate::Llm(_) => {
-                        if parent.input.is_some() {
-                            task_instance.input = parent.input.clone();
-                            // already resolved by run_node
-                            task_instance.input.clone().unwrap_or_default();
-                        }
-                        parent_node_ctx.clone()
-                    }
-                    _ => parent_node_ctx.clone(),
-                };
-                if task_instance.input.is_none() {
-                    task_instance.input =
-                        Some(super::workflow::resolved_llm_request_snapshot(tpl, &ctx));
-                }
+        task_instance.input = match &task_instance.task_template {
+            TaskTemplate::Http(tpl) => {
+                Self::resolve_http_child_input(tpl, parent, job, parent_node_ctx)
             }
-            _ => {}
-        }
+            TaskTemplate::Llm(tpl) => {
+                Self::resolve_llm_child_input(tpl, parent, job, parent_node_ctx)
+            }
+            _ => None,
+        };
 
         task_svc
             .create_task_instance_entity(task_instance)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::job::WorkflowCallerContext;
+    use crate::shared::workflow::TaskType;
+    use crate::task::entity::task_definition::{
+        ForkJoinTaskItem, ForkJoinTemplate, LlmTemplate, ParallelMode, ParallelTemplate,
+        TaskHttpTemplate, TaskTemplate,
+    };
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn make_parent(task_template: TaskTemplate, input: Option<serde_json::Value>) -> TaskInstanceEntity {
+        let now = Utc::now();
+        TaskInstanceEntity {
+            id: "parent-1".into(),
+            tenant_id: "t1".into(),
+            task_id: "task-def".into(),
+            task_name: "test".into(),
+            task_type: TaskType::Http,
+            task_template,
+            task_status: crate::shared::workflow::TaskInstanceStatus::Pending,
+            task_instance_id: "parent-inst-1".into(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            input,
+            output: None,
+            error_message: None,
+            execution_duration: None,
+            caller_context: None,
+        }
+    }
+
+    fn make_job(item_index: Option<usize>) -> ExecuteTaskJob {
+        ExecuteTaskJob {
+            task_instance_id: "child-1".into(),
+            tenant_id: "t1".into(),
+            caller_context: Some(WorkflowCallerContext {
+                workflow_instance_id: "wf-1".into(),
+                node_id: "node1".into(),
+                parent_task_instance_id: None,
+                item_index,
+            }),
+        }
+    }
+
+    fn dummy_http_template() -> TaskHttpTemplate {
+        TaskHttpTemplate {
+            url: "https://example.com/api".into(),
+            method: crate::task::entity::task_definition::HttpMethod::Post,
+            headers: vec![],
+            body: vec![],
+            form: vec![],
+            retry_count: 0,
+            retry_delay: 0,
+            timeout: 10,
+            success_condition: None,
+        }
+    }
+
+    fn dummy_llm_template() -> LlmTemplate {
+        LlmTemplate {
+            base_url: "https://api.llm.com".into(),
+            model: "gpt-4".into(),
+            api_key_ref: "key-1".into(),
+            system_prompt: None,
+            user_prompt: "hello".into(),
+            temperature: None,
+            max_tokens: None,
+            timeout: 30,
+            retry_count: 0,
+            retry_delay: 0,
+            response_format: None,
+            form: vec![],
+        }
+    }
+
+    #[test]
+    fn test_resolve_http_child_input_simple_parent() {
+        let parent = make_parent(TaskTemplate::Http(dummy_http_template()), None);
+        let job = make_job(None);
+        let ctx = json!({"key": "val"});
+        let result = PluginManager::resolve_http_child_input(
+            &dummy_http_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_resolve_http_child_input_parent_has_resolved_url() {
+        let parent = make_parent(
+            TaskTemplate::Http(dummy_http_template()),
+            Some(json!({"url": "https://resolved.example.com", "body": "ok"})),
+        );
+        let job = make_job(None);
+        let ctx = json!({});
+        let result = PluginManager::resolve_http_child_input(
+            &dummy_http_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert!(result.is_some());
+        let output = result.unwrap();
+        assert_eq!(output["url"], "https://resolved.example.com");
+    }
+
+    #[test]
+    fn test_resolve_http_child_input_parallel_parent() {
+        let inner_template = Box::new(TaskTemplate::Http(dummy_http_template()));
+        let pt = ParallelTemplate {
+            task_template: inner_template,
+            items_path: "items".into(),
+            item_alias: "item".into(),
+            concurrency: 1,
+            mode: ParallelMode::Rolling,
+            max_failures: Some(0),
+        };
+        let parent = make_parent(TaskTemplate::Parallel(pt), None);
+        let job = make_job(Some(0));
+        let ctx = json!({"items": [{"name": "a"}]});
+        let result = PluginManager::resolve_http_child_input(
+            &dummy_http_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_resolve_llm_child_input_simple_parent() {
+        let parent = make_parent(TaskTemplate::Http(dummy_http_template()), None);
+        let job = make_job(None);
+        let ctx = json!({"key": "val"});
+        let result = PluginManager::resolve_llm_child_input(
+            &dummy_llm_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_resolve_llm_child_input_parent_has_resolved() {
+        let parent = make_parent(
+            TaskTemplate::Llm(dummy_llm_template()),
+            Some(json!({"system_prompt": "sys", "user_prompt": "hi"})),
+        );
+        let job = make_job(None);
+        let ctx = json!({});
+        let result = PluginManager::resolve_llm_child_input(
+            &dummy_llm_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert_eq!(result, Some(json!({"system_prompt": "sys", "user_prompt": "hi"})));
+    }
+
+    #[test]
+    fn test_resolve_llm_child_input_parallel_parent() {
+        let inner_template = Box::new(TaskTemplate::Llm(dummy_llm_template()));
+        let pt = ParallelTemplate {
+            task_template: inner_template,
+            items_path: "items".into(),
+            item_alias: "item".into(),
+            concurrency: 1,
+            mode: ParallelMode::Rolling,
+            max_failures: Some(0),
+        };
+        let parent = make_parent(TaskTemplate::Parallel(pt), None);
+        let job = make_job(Some(0));
+        let ctx = json!({"items": [{"name": "a"}]});
+        let result = PluginManager::resolve_llm_child_input(
+            &dummy_llm_template(),
+            &parent,
+            &job,
+            &ctx,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_derive_child_template_parallel() {
+        let inner = Box::new(TaskTemplate::Http(dummy_http_template()));
+        let pt = ParallelTemplate {
+            task_template: inner,
+            items_path: "items".into(),
+            item_alias: "item".into(),
+            concurrency: 1,
+            mode: ParallelMode::Rolling,
+            max_failures: Some(0),
+        };
+        let parent = make_parent(TaskTemplate::Parallel(pt), None);
+        let job = make_job(Some(0));
+        let (template, tt, override_id) =
+            PluginManager::derive_child_template(&parent, &job).unwrap();
+        assert!(matches!(template, TaskTemplate::Http(_)));
+        assert_eq!(tt, TaskType::Http);
+        assert_eq!(override_id, None);
+    }
+
+    #[test]
+    fn test_derive_child_template_simple() {
+        let parent = make_parent(TaskTemplate::Http(dummy_http_template()), None);
+        let job = make_job(None);
+        let (template, tt, override_id) =
+            PluginManager::derive_child_template(&parent, &job).unwrap();
+        assert!(matches!(template, TaskTemplate::Http(_)));
+        assert_eq!(tt, TaskType::Http);
+        assert_eq!(override_id, None);
+    }
+
+    #[test]
+    fn test_derive_child_template_forkjoin() {
+        let item = ForkJoinTaskItem {
+            task_key: "key1".into(),
+            task_id: Some("fj-task-1".into()),
+            name: "task1".into(),
+            task_template: TaskTemplate::Http(dummy_http_template()),
+        };
+        let fj = ForkJoinTemplate {
+            tasks: vec![item],
+            concurrency: 1,
+            mode: ParallelMode::Batch,
+            max_failures: Some(0),
+        };
+        let parent = make_parent(TaskTemplate::ForkJoin(fj), None);
+        let job = make_job(Some(0));
+        let (template, tt, override_id) =
+            PluginManager::derive_child_template(&parent, &job).unwrap();
+        assert!(matches!(template, TaskTemplate::Http(_)));
+        assert_eq!(tt, TaskType::Http);
+        assert_eq!(override_id, Some("fj-task-1".into()));
     }
 }

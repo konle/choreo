@@ -108,3 +108,68 @@ pub fn rhai_map_to_json(dynamic: Dynamic) -> anyhow::Result<serde_json::Map<Stri
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhai::Dynamic;
+
+    #[test]
+    fn test_dynamic_to_json_null() {
+        assert_eq!(dynamic_to_json(&Dynamic::UNIT), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_dynamic_to_json_bool() {
+        assert_eq!(
+            dynamic_to_json(&Dynamic::from(true)),
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_dynamic_to_json_int() {
+        assert_eq!(
+            dynamic_to_json(&Dynamic::from(42_i64)),
+            serde_json::json!(42)
+        );
+    }
+
+    #[test]
+    fn test_dynamic_to_json_float() {
+        assert_eq!(
+            dynamic_to_json(&Dynamic::from(3.14_f64)),
+            serde_json::json!(3.14)
+        );
+    }
+
+    #[test]
+    fn test_dynamic_to_json_string() {
+        assert_eq!(
+            dynamic_to_json(&Dynamic::from("hello")),
+            serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn test_dynamic_to_json_array() {
+        let arr: rhai::Array = vec![Dynamic::from(1_i64), Dynamic::from("two")];
+        let val = Dynamic::from_array(arr);
+        assert_eq!(
+            dynamic_to_json(&val),
+            serde_json::json!([1, "two"])
+        );
+    }
+
+    #[test]
+    fn test_dynamic_to_json_map() {
+        let mut map = rhai::Map::new();
+        map.insert("a".into(), Dynamic::from(1_i64));
+        map.insert("b".into(), Dynamic::from("x"));
+        let val = Dynamic::from_map(map);
+        let json_val = dynamic_to_json(&val);
+        let obj = json_val.as_object().unwrap();
+        assert_eq!(obj["a"], serde_json::json!(1));
+        assert_eq!(obj["b"], serde_json::json!("x"));
+    }
+}
