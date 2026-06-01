@@ -141,6 +141,9 @@ mod integration_tests {
         fn new() -> Self {
             Self { instances: Mutex::new(vec![]) }
         }
+        fn with_tasks(tasks: Vec<TaskInstanceEntity>) -> Self {
+            Self { instances: Mutex::new(tasks) }
+        }
     }
 
     #[async_trait]
@@ -181,6 +184,7 @@ mod integration_tests {
 
     // ── Test Helpers ──
 
+    /// Simple helper: PluginManager + dispatcher. Use for tests that just need to invoke methods.
     fn make_pm(instances: Vec<WorkflowInstanceEntity>) -> (PluginManager, MockDispatcher) {
         let wf_repo: Arc<dyn WorkflowInstanceRepository> = Arc::new(MockWfRepo::new(instances));
         let ti_repo: Arc<dyn TaskInstanceEntityRepository> = Arc::new(MockTaskRepo::new());
@@ -194,6 +198,28 @@ mod integration_tests {
             Arc::new(dispatcher.clone()),
         );
         (pm, dispatcher)
+    }
+
+    /// Full helper exposing repos for pre-populating mock data.
+    fn make_pm_full(
+        wf_instances: Vec<WorkflowInstanceEntity>,
+        task_instances: Vec<TaskInstanceEntity>,
+    ) -> (PluginManager, MockDispatcher, Arc<MockWfRepo>, Arc<MockTaskRepo>) {
+        let wf_repo = Arc::new(MockWfRepo::new(wf_instances));
+        let ti_repo = Arc::new(MockTaskRepo::new());
+        for ti in task_instances {
+            ti_repo.instances.lock().unwrap().push(ti);
+        }
+        let ti_svc = Arc::new(TaskInstanceService::new(ti_repo.clone()));
+        let wf_svc = Arc::new(
+            crate::workflow::service::WorkflowInstanceService::new(wf_repo.clone(), ti_svc),
+        );
+        let dispatcher = MockDispatcher::new();
+        let pm = PluginManager::new(
+            wf_svc,
+            Arc::new(dispatcher.clone()),
+        );
+        (pm, dispatcher, wf_repo, ti_repo)
     }
 
     fn make_pending_instance(id: &str) -> WorkflowInstanceEntity {
@@ -308,20 +334,42 @@ mod integration_tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn resolve_child_status_subworkflow_not_found() {
-        let (pm, _dispatcher) = make_pm(vec![]);
-
-        let template = TaskTemplate::SubWorkflow(crate::task::entity::task_definition::SubWorkflowTemplate {
-            workflow_meta_id: "wm1".into(),
-            workflow_version: 1,
-            form: vec![],
-            timeout: None,
-        });
-        let result = pm.resolve_child_status("non-existent", &template).await;
-        assert!(matches!(result, ChildStatus::NotFound));
+    fn make_task_entity(id: &str, status: TaskInstanceStatus) -> TaskInstanceEntity {
+        let now = chrono::Utc::now();
+        TaskInstanceEntity {
+            id: format!("tid-{}", id),
+            tenant_id: "t1".into(),
+            task_id: "td-1".into(),
+            task_name: "test".into(),
+            task_type: TaskType::Http,
+            task_template: crate::task::entity::task_definition::TaskTemplate::Grpc,
+            task_status: status,
+            task_instance_id: id.into(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            input: None,
+            output: None,
+            error_message: None,
+            execution_duration: None,
+            caller_context: None,
+        }
     }
 
+    #[tokio::test]
+    async fn resolve_child_status_task_completed() {
+        let (pm, _dispatcher) = make_pm(vec![]);
+
+        let ti = make_task_entity("task-1", TaskInstanceStatus::Completed);
+        let ti_repo = Arc::new(MockTaskRepo::with_tasks(vec![ti]));
+        let ti_svc = Arc::new(TaskInstanceService::new(ti_repo));
+        let pm2 = pm.with_task_instance_service(ti_svc);
+
+        let result = pm2
+            .resolve_child_status("task-1", &TaskTemplate::Grpc)
+            .await;
+        assert!(matches!(result, ChildStatus::Completed(_)));
+    }
     #[tokio::test]
     async fn resolve_child_status_task_not_found() {
         let (pm, _dispatcher) = make_pm(vec![]);
