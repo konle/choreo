@@ -358,4 +358,30 @@ mod tests {
             TaskType::ContextRewrite
         );
     }
+
+    #[tokio::test]
+    async fn merge_mode_with_non_object_context_replaces() {
+        let plugin = ContextRewritePlugin::new();
+        let mut wf = make_instance(serde_json::json!("not_an_object"));
+        let mut node = make_node(
+            &plugin,
+            &wf,
+            "r6",
+            r#"#{"key": "from_script"}"#,
+            MergeMode::Merge,
+        );
+        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await;
+        assert!(result.is_ok());
+        let obj = wf.context.as_object().unwrap();
+        assert_eq!(obj["key"], "from_script");
+    }
+
+    #[tokio::test]
+    async fn compile_error_returns_err() {
+        let plugin = ContextRewritePlugin::new();
+        let mut wf = make_instance(serde_json::json!({}));
+        let mut node = make_node(&plugin, &wf, "r7", "{{broken syntax", MergeMode::Merge);
+        let result = plugin.execute(&StubExecutor, &mut node, &mut wf).await;
+        assert!(result.is_err());
+    }
 }

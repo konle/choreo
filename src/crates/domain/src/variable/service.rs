@@ -14,6 +14,25 @@ pub struct VariableService {
     encrypt_key: Arc<String>,
 }
 
+pub fn parse_variable_value(value_type: &VariableType, raw: &str) -> Result<JsonValue, String> {
+    match value_type {
+        VariableType::String | VariableType::Secret => Ok(JsonValue::String(raw.to_string())),
+        VariableType::Number => {
+            let n: f64 = raw.parse().map_err(|_| "value is not a valid number".to_string())?;
+            Ok(serde_json::json!(n))
+        }
+        VariableType::Bool => {
+            let b: bool = raw.parse().map_err(|_| "value is not a valid bool".to_string())?;
+            Ok(JsonValue::Bool(b))
+        }
+        VariableType::Json => {
+            let v: JsonValue = serde_json::from_str(raw)
+                .map_err(|e| format!("value is not valid JSON: {}", e))?;
+            Ok(v)
+        }
+    }
+}
+
 impl VariableService {
     pub fn new(repository: Arc<dyn VariableRepository>, encrypt_key: String) -> Self {
         Self {
@@ -176,27 +195,7 @@ impl VariableService {
         } else {
             var.value.clone()
         };
-
-        match var.variable_type {
-            VariableType::String | VariableType::Secret => Ok(JsonValue::String(raw)),
-            VariableType::Number => {
-                let n: f64 = raw
-                    .parse()
-                    .map_err(|_| format!("variable '{}' is not a valid number", var.key))?;
-                Ok(serde_json::json!(n))
-            }
-            VariableType::Bool => {
-                let b: bool = raw
-                    .parse()
-                    .map_err(|_| format!("variable '{}' is not a valid bool", var.key))?;
-                Ok(JsonValue::Bool(b))
-            }
-            VariableType::Json => {
-                let v: JsonValue = serde_json::from_str(&raw)
-                    .map_err(|e| format!("variable '{}' is not valid JSON: {}", var.key, e))?;
-                Ok(v)
-            }
-        }
+        parse_variable_value(&var.variable_type, &raw).map_err(RepositoryError::from)
     }
 
     fn encrypt(&self, plaintext: &str) -> Result<String, RepositoryError> {
@@ -277,5 +276,59 @@ impl VariableService {
             key[24..32].copy_from_slice(&h4);
         }
         key
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::variable::entity::VariableType;
+
+    #[test]
+    fn parse_string_value() {
+        let result = parse_variable_value(&VariableType::String, "hello").unwrap();
+        assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn parse_secret_value() {
+        let result = parse_variable_value(&VariableType::Secret, "s3cret").unwrap();
+        assert_eq!(result, serde_json::json!("s3cret"));
+    }
+
+    #[test]
+    fn parse_number_valid() {
+        let result = parse_variable_value(&VariableType::Number, "42.5").unwrap();
+        assert_eq!(result, serde_json::json!(42.5));
+    }
+
+    #[test]
+    fn parse_number_invalid() {
+        let result = parse_variable_value(&VariableType::Number, "abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_bool_valid() {
+        let result = parse_variable_value(&VariableType::Bool, "true").unwrap();
+        assert_eq!(result, serde_json::json!(true));
+    }
+
+    #[test]
+    fn parse_bool_invalid() {
+        let result = parse_variable_value(&VariableType::Bool, "yes");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_json_valid() {
+        let result = parse_variable_value(&VariableType::Json, r#"{"a":1}"#).unwrap();
+        assert_eq!(result, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn parse_json_invalid() {
+        let result = parse_variable_value(&VariableType::Json, "not json");
+        assert!(result.is_err());
     }
 }
