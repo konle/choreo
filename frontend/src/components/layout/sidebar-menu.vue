@@ -33,6 +33,16 @@
       审批中心
     </a-menu-item>
 
+    <a-menu-item key="notifications">
+      <template #icon><icon-notification /></template>
+      通知中心
+    </a-menu-item>
+
+    <a-menu-item key="subscriptions">
+      <template #icon><icon-settings /></template>
+      通知订阅
+    </a-menu-item>
+
     <a-menu-item v-if="canManageUsers" key="users">
       <template #icon><icon-user-group /></template>
       用户管理
@@ -60,6 +70,8 @@ import {
   IconBranch,
   IconLock,
   IconCheckSquare,
+  IconNotification,
+  IconSettings,
   IconUserGroup,
   IconApps,
   IconSafe,
@@ -77,6 +89,8 @@ const MENU_ROUTE_MAP: Record<string, string> = {
   'workflow-instances': '/workflows/instances',
   variables: '/variables',
   approvals: '/approvals',
+  notifications: '/notifications',
+  subscriptions: '/subscriptions',
   users: '/users',
   'api-keys': '/api-keys',
   tenants: '/tenants',
@@ -90,6 +104,8 @@ const ROUTE_MENU_MAP: Record<string, string> = {
   '/workflows/instances': 'workflow-instances',
   '/variables': 'variables',
   '/approvals': 'approvals',
+  '/notifications': 'notifications',
+  '/subscriptions': 'subscriptions',
   '/users': 'users',
   '/api-keys': 'api-keys',
   '/tenants': 'tenants',

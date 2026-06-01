@@ -127,6 +127,18 @@ const routes: RouteRecordRaw[] = [
         component: () => import('../views/apikey/list.vue'),
         meta: { permission: 'UserManage' },
       },
+      {
+        path: 'notifications',
+        name: 'NotificationList',
+        component: () => import('../views/notification/list.vue'),
+        meta: { title: '通知中心' },
+      },
+      {
+        path: 'subscriptions',
+        name: 'SubscriptionList',
+        component: () => import('../views/subscription/list.vue'),
+        meta: { title: '通知订阅' },
+      },
     ],
   },
   {

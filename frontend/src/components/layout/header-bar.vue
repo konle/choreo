@@ -20,6 +20,44 @@
           :label="t.name"
         />
       </a-select>
+
+      <a-popover trigger="click" @popup-visible-change="onNotifPopup">
+        <a-badge :count="unreadCount" :max-count="99">
+          <a-button type="text">
+            <template #icon><icon-notification /></template>
+          </a-button>
+        </a-badge>
+        <template #content>
+          <div class="notif-popup">
+            <div v-if="recentNotifications.length === 0 && !notifLoading" style="padding: 12px; text-align: center; color: var(--color-text-3);">
+              暂无通知
+            </div>
+            <a-list v-else :bordered="false" style="width: 320px;">
+              <a-list-item
+                v-for="item in recentNotifications.slice(0, 5)"
+                :key="item.notification_id"
+                class="notif-popup-item"
+                @click="openNotif(item)"
+              >
+                <a-list-item-meta>
+                  <template #title>
+                    <span style="font-size:13px;">
+                      <a-tag :color="notifColor(item.event_type)" size="small">{{ notifLabel(item.event_type) }}</a-tag>
+                    </span>
+                  </template>
+                  <template #description>
+                    <span style="font-size:12px;color:var(--color-text-3);">{{ notifTime(item.created_at) }}</span>
+                  </template>
+                </a-list-item-meta>
+              </a-list-item>
+            </a-list>
+            <div style="text-align:center;padding:8px;border-top:1px solid var(--color-border-1);">
+              <a-button type="text" size="mini" @click="goNotifications">查看全部</a-button>
+            </div>
+          </div>
+        </template>
+      </a-popover>
+
       <a-dropdown>
         <a-button type="text">
           <template #icon><icon-user /></template>
@@ -79,10 +117,13 @@ import { useAuthStore } from '../../stores/auth'
 import { usePermission } from '../../composables/use-permission'
 import { tenantApi } from '../../api/tenant'
 import { authApi } from '../../api/auth'
-import { IconUser, IconLock, IconExport, IconIdcard } from '@arco-design/web-vue/es/icon'
+import { IconUser, IconLock, IconExport, IconIdcard, IconNotification } from '@arco-design/web-vue/es/icon'
 import { Notification } from '@arco-design/web-vue'
 import type { TenantEntity } from '../../types/tenant'
 import type { UserProfile } from '../../types/auth'
+import { notificationApi } from '../../api/notification'
+import { usePolling } from '../../composables/use-polling'
+import type { NotificationRecord } from '../../types/notification'
 
 const router = useRouter()
 const route = useRoute()
@@ -96,6 +137,16 @@ const showChangePw = ref(false)
 const changePwLoading = ref(false)
 const profile = ref<UserProfile | null>(null)
 const pwForm = reactive({ old_password: '', new_password: '', confirm_password: '' })
+const unreadCount = ref(0)
+const recentNotifications = ref<NotificationRecord[]>([])
+const notifLoading = ref(false)
+
+const { start: startPolling } = usePolling(async () => {
+  try {
+    const res = await notificationApi.unreadCount()
+    unreadCount.value = res.data ?? 0
+  } catch { /* ignore */ }
+}, 30000)
 
 const currentRouteName = computed(() => {
   return (route.meta?.title as string) || route.name?.toString() || ''
@@ -108,6 +159,11 @@ onMounted(async () => {
       tenants.value = res.data
     } catch { /* ignore */ }
   }
+  startPolling()
+  try {
+    const res = await notificationApi.unreadCount()
+    unreadCount.value = res.data ?? 0
+  } catch { /* ignore */ }
 })
 
 watch(showProfile, async (val) => {
@@ -153,6 +209,61 @@ function handleLogout() {
   auth.logout()
   router.push('/login')
 }
+
+async function onNotifPopup(visible: boolean) {
+  if (visible) {
+    notifLoading.value = true
+    try {
+      const res = await notificationApi.list(1, 5)
+      recentNotifications.value = res.data || []
+    } catch {} finally { notifLoading.value = false }
+  }
+}
+
+function openNotif(item: NotificationRecord) {
+  if (!item.read) {
+    notificationApi.markRead(item.notification_id).catch(() => {})
+    item.read = true
+    unreadCount.value = Math.max(0, unreadCount.value - 1)
+  }
+  if (item.url) {
+    const path = item.url.replace(/^https?:\/\/[^/]+/, '')
+    if (path) router.push(path)
+  }
+}
+
+function goNotifications() {
+  router.push('/notifications')
+}
+
+function notifLabel(type: string): string {
+  const map: Record<string, string> = {
+    'workflow.started': '启动', 'workflow.completed': '已完成',
+    'workflow.failed': '失败', 'workflow.canceled': '已取消',
+    'node.success': '节点成功', 'node.failed': '节点失败',
+    'approval.pending': '待审批', 'approval.approved': '审批通过',
+    'approval.rejected': '已驳回', 'sweeper.recovered': '已恢复',
+  }
+  return map[type] || type
+}
+
+function notifColor(type: string): string {
+  if (type.includes('failed') || type.includes('rejected')) return 'red'
+  if (type.includes('completed') || type.includes('success') || type.includes('approved')) return 'green'
+  if (type.includes('pending') || type.includes('started')) return 'blue'
+  return 'gray'
+}
+
+function notifTime(ts: string): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const now = new Date()
+  const diff = now.getTime() - d.getTime()
+  if (diff < 60000) return '刚刚'
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`
+  return d.toLocaleDateString()
+}
 </script>
 
 <style scoped>
@@ -165,5 +276,6 @@ function handleLogout() {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 </style>
