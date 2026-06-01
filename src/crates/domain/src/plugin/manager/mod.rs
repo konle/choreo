@@ -8,6 +8,8 @@ mod workflow;
 
 pub use workflow::resolved_llm_request_snapshot;
 
+use crate::notification::dispatcher::NotificationDispatcher;
+use crate::notification::entity::NotificationEvent;
 use crate::plugin::interface::{ChildStatus, ExecutionResult, PluginExecutor, PluginInterface};
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::TaskTemplate;
@@ -20,7 +22,7 @@ use crate::workflow::service::WorkflowInstanceService;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 
 pub struct PluginManager {
     pub(super) plugins: HashMap<TaskType, Box<dyn PluginInterface>>,
@@ -28,6 +30,7 @@ pub struct PluginManager {
     pub(super) task_instance_svc: Option<Arc<TaskInstanceService>>,
     pub(super) variable_svc: Option<VariableService>,
     pub(super) dispatcher: Arc<dyn crate::shared::job::TaskDispatcher>,
+    pub(super) notification_dispatcher: Option<Arc<dyn NotificationDispatcher>>,
 }
 
 impl PluginManager {
@@ -41,6 +44,7 @@ impl PluginManager {
             task_instance_svc: None,
             variable_svc: None,
             dispatcher,
+            notification_dispatcher: None,
         }
     }
 
@@ -51,6 +55,14 @@ impl PluginManager {
 
     pub fn with_task_instance_service(mut self, svc: Arc<TaskInstanceService>) -> Self {
         self.task_instance_svc = Some(svc);
+        self
+    }
+
+    pub fn with_notification_dispatcher(
+        mut self,
+        disp: Arc<dyn NotificationDispatcher>,
+    ) -> Self {
+        self.notification_dispatcher = Some(disp);
         self
     }
 
@@ -65,6 +77,36 @@ impl PluginManager {
     pub fn register(&mut self, plugin: Box<dyn PluginInterface>) {
         let task_type = plugin.plugin_type();
         self.plugins.insert(task_type, plugin);
+    }
+
+    pub(super) fn emit_notification(
+        &self,
+        event_type: &str,
+        workflow_meta_id: Option<&str>,
+        target_user_ids: Option<Vec<String>>,
+        payload: serde_json::Value,
+    ) {
+        let Some(ref disp) = self.notification_dispatcher else {
+            return;
+        };
+        let tenant_id = payload
+            .get("data")
+            .and_then(|d| d.get("tenant_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let event = NotificationEvent {
+            tenant_id: tenant_id.to_string(),
+            event_type: event_type.to_string(),
+            workflow_meta_id: workflow_meta_id.map(|s| s.to_string()),
+            target_user_ids,
+            payload,
+        };
+        let disp = disp.clone();
+        tokio::spawn(async move {
+            if let Err(e) = disp.dispatch_notification(event).await {
+                warn!(error = %e, "failed to emit notification");
+            }
+        });
     }
 }
 

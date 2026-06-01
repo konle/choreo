@@ -1,5 +1,6 @@
 pub mod apikey;
 pub mod approval;
+pub mod notification;
 pub mod plugin;
 pub mod shared;
 pub mod sweeper;

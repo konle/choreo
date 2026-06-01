@@ -1,6 +1,7 @@
 pub mod apikey;
 pub mod approval;
 pub mod indexes;
+pub mod notification;
 pub mod task;
 pub mod tenant;
 pub mod user;

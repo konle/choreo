@@ -2,6 +2,8 @@ use apalis::prelude::*;
 use apalis_redis::RedisStorage;
 use clap::Parser;
 use domain::approval::service::ApprovalService;
+use domain::notification::dispatcher::NotificationDispatcher;
+use domain::notification::service::NotificationService;
 use domain::plugin::manager::PluginManager;
 use domain::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowEvent};
 use domain::sweeper::{Sweeper, SweeperConfig};
@@ -10,7 +12,7 @@ use domain::variable::service::VariableService;
 use domain::workflow::entity::workflow_definition::NodeExecutionStatus;
 use domain::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 use infrastructure::queue::consumer;
-use infrastructure::queue::dispatcher::ApalisDispatcher;
+use infrastructure::queue::dispatcher::{ApalisDispatcher, ApalisNotificationDispatcher};
 use std::sync::Arc;
 use tokio::time::Instant;
 use tracing::{error, info, warn};
@@ -208,6 +210,76 @@ async fn handle_task_job(
 
     Ok(())
 }
+
+async fn handle_notification_event(
+    event: domain::notification::entity::NotificationEvent,
+    service: Data<Arc<NotificationService>>,
+) -> Result<(), std::io::Error> {
+    use domain::notification::entity::NotificationChannel;
+
+    if let Some(ref user_ids) = event.target_user_ids {
+        for uid in user_ids {
+            if let Err(e) = service
+                .create_in_app_record(
+                    &event.tenant_id,
+                    uid,
+                    &event.event_type,
+                    &event.payload,
+                    "force_push",
+                    "",
+                    event.workflow_meta_id.as_deref(),
+                )
+                .await
+            {
+                warn!(notification_error = %e, "failed to create forced notification record");
+            }
+        }
+    } else {
+        let recipients = match service
+            .find_recipients_for_event(
+                &event.tenant_id,
+                &event.event_type,
+                event.workflow_meta_id.as_deref(),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(notification_error = %e, "failed to find notification recipients");
+                return Ok(());
+            }
+        };
+
+        for (user_id, channels) in &recipients {
+            for chan in channels {
+                match chan {
+                    NotificationChannel::InApp => {
+                        if let Err(e) = service
+                            .create_in_app_record(
+                                &event.tenant_id,
+                                user_id,
+                                &event.event_type,
+                                &event.payload,
+                                "subscription",
+                                "",
+                                event.workflow_meta_id.as_deref(),
+                            )
+                            .await
+                        {
+                            warn!(notification_error = %e, "failed to create in-app notification record");
+                        }
+                    }
+                    NotificationChannel::Webhook { .. } => {
+                        // V1: Webhook delivery not yet implemented
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn create_plugin_manager(
     workflow_definition_svc: WorkflowDefinitionService,
     workflow_instance_svc: Arc<WorkflowInstanceService>,
@@ -216,11 +288,13 @@ fn create_plugin_manager(
     approval_svc: ApprovalService,
     task_storage: RedisStorage<ExecuteTaskJob>,
     workflow_storage: RedisStorage<ExecuteWorkflowJob>,
+    notification_dispatcher: Arc<dyn NotificationDispatcher>,
 ) -> Arc<PluginManager> {
     let dispatcher = Arc::new(ApalisDispatcher::new(task_storage, workflow_storage));
     let mut manager = PluginManager::new(workflow_instance_svc.clone(), dispatcher)
         .with_task_instance_service(task_instance_svc)
-        .with_variable_service(variable_svc);
+        .with_variable_service(variable_svc)
+        .with_notification_dispatcher(notification_dispatcher);
     manager.register(Box::new(domain::plugin::plugins::http::HttpPlugin::new()));
     manager.register(Box::new(
         domain::plugin::plugins::parallel::ParallelPlugin::new(),
@@ -322,7 +396,30 @@ async fn main() {
 
     let wf_storage = consumer::create_workflow_storage(&config.database.redis_url).await;
     let task_storage = consumer::create_task_storage(&config.database.redis_url).await;
+    let notification_storage =
+        consumer::create_notification_storage(&config.database.redis_url).await;
     info!("connected to Redis");
+
+    let notification_dispatcher: Arc<dyn NotificationDispatcher> =
+        Arc::new(ApalisNotificationDispatcher::new(notification_storage.clone()));
+
+    let notification_sub_repo = Arc::new(
+        infrastructure::mongodb::notification::notification_repository_impl::NotificationSubscriptionRepositoryImpl::new(mongo_client.clone()),
+    );
+    notification_sub_repo.ensure_indexes().await.unwrap_or_else(|e| {
+        error!(error = %e, "failed to ensure notification subscription indexes");
+    });
+    let notification_record_repo = Arc::new(
+        infrastructure::mongodb::notification::notification_repository_impl::NotificationRecordRepositoryImpl::new(mongo_client.clone()),
+    );
+    notification_record_repo.ensure_indexes().await.unwrap_or_else(|e| {
+        error!(error = %e, "failed to ensure notification record indexes");
+    });
+    let notification_service = Arc::new(NotificationService::new(
+        notification_sub_repo,
+        notification_record_repo,
+        config.notification.frontend_base_url.clone(),
+    ));
 
     let plugin_manager = create_plugin_manager(
         workflow_definition_svc,
@@ -332,6 +429,7 @@ async fn main() {
         approval_svc.clone(),
         task_storage.clone(),
         wf_storage.clone(),
+        notification_dispatcher.clone(),
     );
 
     let wf_worker = WorkerBuilder::new("workflow-worker")
@@ -355,7 +453,8 @@ async fn main() {
                     max_recover_per_cycle: config.sweeper.max_recover_per_cycle,
                 },
             )
-            .with_approval_service(approval_svc.clone()),
+            .with_approval_service(approval_svc.clone())
+            .with_notification_dispatcher(notification_dispatcher.clone()),
         );
         let interval_secs = config.sweeper.interval_secs;
         tokio::spawn(async move {
@@ -376,9 +475,15 @@ async fn main() {
 
     info!("engine ready, waiting for jobs");
 
+    let notification_worker = WorkerBuilder::new("notification-worker")
+        .data(notification_service)
+        .backend(notification_storage)
+        .build_fn(handle_notification_event);
+
     Monitor::new()
         .register(wf_worker)
         .register(task_worker)
+        .register(notification_worker)
         .run()
         .await
         .unwrap_or_else(|e| {

@@ -56,6 +56,35 @@ impl PluginManager {
         instance.updated_at = chrono::Utc::now();
         self.save_instance_and_bump_epoch(instance).await?;
 
+        let node = &instance.nodes[node_index];
+        match &node.status {
+            NodeExecutionStatus::Success => {
+                self.emit_notification(
+                    "node.success",
+                    Some(&instance.workflow_meta_id),
+                    None,
+                    super::workflow::make_node_payload(instance, node),
+                );
+            }
+            NodeExecutionStatus::Failed => {
+                self.emit_notification(
+                    "node.failed",
+                    Some(&instance.workflow_meta_id),
+                    None,
+                    super::workflow::make_node_payload(instance, node),
+                );
+            }
+            NodeExecutionStatus::Skipped => {
+                self.emit_notification(
+                    "node.skipped",
+                    Some(&instance.workflow_meta_id),
+                    None,
+                    super::workflow::make_node_payload(instance, node),
+                );
+            }
+            _ => {}
+        }
+
         // After successful persistence, dispatch outbound events based on the transition
         self.dispatch_outbound_for_transition(instance, &old_status)
             .await;

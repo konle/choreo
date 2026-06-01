@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use crate::task::repository::RepositoryError;
-use super::entity::{NotificationSubscription, NotificationRecord};
+use super::entity::{NotificationRecord, NotificationSubscription};
+use super::error::RepositoryError;
 
 #[async_trait]
 pub trait NotificationSubscriptionRepository: Send + Sync {

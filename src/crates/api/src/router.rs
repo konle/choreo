@@ -3,6 +3,8 @@ use crate::handler::approval::{ApprovalHandler, routes as approval_routes};
 use crate::handler::auth::{
     AuthHandler, protected_routes as auth_protected_routes, public_routes as auth_public_routes,
 };
+use crate::handler::notification::{NotificationHandler, routes as notification_routes};
+use crate::handler::subscription::{SubscriptionHandler, routes as subscription_routes};
 use crate::handler::task::{TaskHandler, TaskInstanceHandler, routes as task_routes};
 use crate::handler::tenant::{TenantHandler, routes as tenant_routes};
 use crate::handler::user::{UserHandler, routes as user_routes};
@@ -28,6 +30,8 @@ pub fn create_router(
     task_instance_handler: Arc<TaskInstanceHandler>,
     workflow_handler: Arc<WorkflowHandler>,
     workflow_instance_handler: Arc<WorkflowInstanceHandler>,
+    notification_handler: Arc<NotificationHandler>,
+    subscription_handler: Arc<SubscriptionHandler>,
 ) -> Router {
     let public = Router::new()
         .nest("/auth", auth_public_routes(auth_handler.clone()))
@@ -63,6 +67,8 @@ pub fn create_router(
                 variable_handler,
             ),
         )
+        .nest("/notifications", notification_routes(notification_handler))
+        .nest("/subscriptions", subscription_routes(subscription_handler))
         .layer(middleware::from_fn(auth_middleware));
 
     let v1 = Router::new().merge(public).merge(protected);

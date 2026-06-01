@@ -1,6 +1,8 @@
 use apalis::prelude::*;
 use apalis_redis::RedisStorage;
 use async_trait::async_trait;
+use domain::notification::dispatcher::NotificationDispatcher;
+use domain::notification::entity::NotificationEvent;
 use domain::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher};
 
 pub struct ApalisDispatcher {
@@ -37,6 +39,28 @@ impl TaskDispatcher for ApalisDispatcher {
             .push(job)
             .await
             .map_err(|e| anyhow::anyhow!("failed to push workflow: {}", e))?;
+        Ok(())
+    }
+}
+
+pub struct ApalisNotificationDispatcher {
+    storage: RedisStorage<NotificationEvent>,
+}
+
+impl ApalisNotificationDispatcher {
+    pub fn new(storage: RedisStorage<NotificationEvent>) -> Self {
+        Self { storage }
+    }
+}
+
+#[async_trait]
+impl NotificationDispatcher for ApalisNotificationDispatcher {
+    async fn dispatch_notification(&self, event: NotificationEvent) -> anyhow::Result<()> {
+        let mut storage = self.storage.clone();
+        storage
+            .push(event)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to push notification: {}", e))?;
         Ok(())
     }
 }

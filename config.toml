@@ -17,6 +17,9 @@ enabled = true
 interval_secs = 60
 max_recover_per_cycle = 10
 
+[notification]
+frontend_base_url = "http://localhost:5173"
+
 [init]
 admin_username = "admin"
 admin_password = "admin123"

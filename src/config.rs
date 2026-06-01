@@ -10,6 +10,26 @@ pub struct AppConfig {
     pub init: InitConfig,
     #[serde(default)]
     pub sweeper: SweeperConfig,
+    #[serde(default)]
+    pub notification: NotificationConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NotificationConfig {
+    #[serde(default = "default_frontend_base_url")]
+    pub frontend_base_url: String,
+}
+
+fn default_frontend_base_url() -> String {
+    "http://localhost:5173".to_string()
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            frontend_base_url: default_frontend_base_url(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

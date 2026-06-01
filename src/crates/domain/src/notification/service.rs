@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use chrono::Utc;
 use uuid::Uuid;
-use crate::task::repository::RepositoryError;
 use super::entity::{
-    NotificationSubscription, NotificationRecord, NotificationChannel,
-    ChannelDeliveryStatus, DeliveryStatus, SubscriptionScope,
+    ChannelDeliveryStatus, DeliveryStatus, NotificationChannel, NotificationRecord,
+    NotificationSubscription, SubscriptionScope,
 };
-use super::repository::{NotificationSubscriptionRepository, NotificationRecordRepository};
+use super::error::RepositoryError;
+use super::repository::{NotificationRecordRepository, NotificationSubscriptionRepository};
 
 #[derive(Clone)]
 pub struct NotificationService {

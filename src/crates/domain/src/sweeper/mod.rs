@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::approval::service::ApprovalService;
+use crate::notification::dispatcher::NotificationDispatcher;
 use crate::shared::job::{
     ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowCallerContext, WorkflowEvent,
 };
@@ -30,6 +31,7 @@ pub struct Sweeper {
     task_instance_svc: Arc<TaskInstanceService>,
     approval_svc: Option<ApprovalService>,
     dispatcher: Arc<dyn TaskDispatcher>,
+    notification_dispatcher: Option<Arc<dyn NotificationDispatcher>>,
     config: SweeperConfig,
 }
 
@@ -45,12 +47,21 @@ impl Sweeper {
             task_instance_svc,
             approval_svc: None,
             dispatcher,
+            notification_dispatcher: None,
             config,
         }
     }
 
     pub fn with_approval_service(mut self, svc: ApprovalService) -> Self {
         self.approval_svc = Some(svc);
+        self
+    }
+
+    pub fn with_notification_dispatcher(
+        mut self,
+        disp: Arc<dyn NotificationDispatcher>,
+    ) -> Self {
+        self.notification_dispatcher = Some(disp);
         self
     }
 

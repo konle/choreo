@@ -5,6 +5,9 @@ use tracing::{error, info};
 
 use infrastructure::mongodb::apikey::apikey_repository_impl::ApiKeyRepositoryImpl;
 use infrastructure::mongodb::approval::approval_repository_impl::ApprovalRepositoryImpl;
+use infrastructure::mongodb::notification::notification_repository_impl::{
+    NotificationRecordRepositoryImpl, NotificationSubscriptionRepositoryImpl,
+};
 use infrastructure::mongodb::task::task_repository_impl::{
     TaskInstanceRepositoryImpl, TaskRepositoryImpl,
 };
@@ -21,6 +24,7 @@ use infrastructure::queue::dispatcher::ApalisDispatcher;
 
 use domain::apikey::service::ApiKeyService;
 use domain::approval::service::ApprovalService;
+use domain::notification::service::NotificationService;
 use domain::task::service::{TaskInstanceService, TaskService};
 use domain::tenant::service::TenantService;
 use domain::user::entity::TenantRole;
@@ -31,6 +35,8 @@ use domain::workflow::service::{WorkflowDefinitionService, WorkflowInstanceServi
 use api::handler::apikey::ApiKeyHandler;
 use api::handler::approval::ApprovalHandler;
 use api::handler::auth::AuthHandler;
+use api::handler::notification::NotificationHandler;
+use api::handler::subscription::SubscriptionHandler;
 use api::handler::task::{TaskHandler, TaskInstanceHandler};
 use api::handler::tenant::TenantHandler;
 use api::handler::user::UserHandler;
@@ -173,6 +179,22 @@ async fn main() {
     let workflow_inst_service =
         WorkflowInstanceService::new(workflow_inst_repo, task_instance_service.clone());
 
+    let notification_sub_repo =
+        Arc::new(NotificationSubscriptionRepositoryImpl::new(mongo_client.clone()));
+    notification_sub_repo.ensure_indexes().await.unwrap_or_else(|e| {
+        error!(error = %e, "failed to ensure notification subscription indexes");
+    });
+    let notification_record_repo =
+        Arc::new(NotificationRecordRepositoryImpl::new(mongo_client.clone()));
+    notification_record_repo.ensure_indexes().await.unwrap_or_else(|e| {
+        error!(error = %e, "failed to ensure notification record indexes");
+    });
+    let notification_service = NotificationService::new(
+        notification_sub_repo,
+        notification_record_repo,
+        config.notification.frontend_base_url.clone(),
+    );
+
     if cli.init {
         bootstrap(&config, &user_service, &tenant_service).await;
     }
@@ -200,6 +222,10 @@ async fn main() {
         dispatcher,
     ));
 
+    let notification_handler = Arc::new(NotificationHandler::new(notification_service.clone()));
+    let subscription_handler =
+        Arc::new(SubscriptionHandler::new(notification_service));
+
     let app = create_router(
         auth_handler,
         tenant_handler,
@@ -211,6 +237,8 @@ async fn main() {
         task_instance_handler,
         workflow_handler,
         workflow_instance_handler,
+        notification_handler,
+        subscription_handler,
     );
 
     let addr = format!("0.0.0.0:{}", config.server.port);

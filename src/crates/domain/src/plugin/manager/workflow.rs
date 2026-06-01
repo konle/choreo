@@ -14,13 +14,45 @@ use crate::shared::job::{ExecuteWorkflowJob, WorkflowEvent};
 use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
 use crate::task::entity::task_definition::TaskTemplate;
 use crate::task::http_template_resolve::{
-    resolve_template_placeholders, resolved_http_request_snapshot,
+    resolved_http_request_snapshot,
 };
 use crate::workflow::entity::workflow_definition::{
     NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 use crate::workflow::resolution_context::augment_merged_context_with_nodes;
 use tracing::{debug, error, info, warn};
+
+pub(super) fn make_workflow_payload(instance: &WorkflowInstanceEntity) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": "",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "data": {
+            "workflow_instance_id": instance.workflow_instance_id,
+            "tenant_id": instance.tenant_id,
+            "workflow_meta_id": instance.workflow_meta_id,
+            "version": instance.workflow_version,
+            "status": format!("{:?}", instance.status),
+        }
+    })
+}
+
+pub(super) fn make_node_payload(
+    instance: &WorkflowInstanceEntity,
+    node: &WorkflowNodeInstanceEntity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event_type": "",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "data": {
+            "workflow_instance_id": instance.workflow_instance_id,
+            "tenant_id": instance.tenant_id,
+            "workflow_meta_id": instance.workflow_meta_id,
+            "node_id": node.node_id,
+            "node_type": format!("{:?}", node.node_type),
+            "status": format!("{:?}", node.status),
+        }
+    })
+}
 
 /// After reloading the workflow, whether the main loop should keep spinning.
 enum LoopOutcome {
@@ -154,6 +186,12 @@ impl PluginManager {
         info!(
             workflow_instance_id = %workflow_instance_id,
             "starting workflow execution"
+        );
+        self.emit_notification(
+            "workflow.started",
+            Some(&instance.workflow_meta_id),
+            None,
+            make_workflow_payload(instance),
         );
         self.execute_workflow(instance).await
     }
@@ -773,6 +811,12 @@ impl PluginManager {
                         .map_err(|e| anyhow::anyhow!(e))?;
                     self.dispatch_outbound_for_transition(instance, &old_status)
                         .await;
+                    self.emit_notification(
+                        "workflow.completed",
+                        Some(&instance.workflow_meta_id),
+                        None,
+                        make_workflow_payload(instance),
+                    );
                     Ok(LoopOutcome::Stop)
                 }
             }
@@ -789,6 +833,12 @@ impl PluginManager {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.dispatch_outbound_for_transition(instance, &old_status)
                     .await;
+                self.emit_notification(
+                    "workflow.failed",
+                    Some(&instance.workflow_meta_id),
+                    None,
+                    make_workflow_payload(instance),
+                );
                 Ok(LoopOutcome::Stop)
             }
             // 我们工作流只做编排，所以碰到这些状态则标识需要外部或者节点完成之后通知我们。因此我们直接返回stop。
