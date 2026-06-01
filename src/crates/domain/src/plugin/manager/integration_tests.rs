@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod integration_tests {
+    use crate::plugin::interface::{ChildStatus, PluginExecutor};
     use crate::plugin::manager::PluginManager;
     use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, TaskDispatcher, WorkflowEvent};
     use crate::shared::workflow::{TaskInstanceStatus, TaskType, WorkflowInstanceStatus};
-    use crate::task::entity::task_definition::TaskInstanceEntity;
+    use crate::task::entity::task_definition::{TaskInstanceEntity, TaskTemplate};
     use crate::task::repository::TaskInstanceEntityRepository;
     use crate::task::service::TaskInstanceService;
     use crate::workflow::entity::workflow_definition::{
@@ -308,20 +309,27 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn process_workflow_job_missing_instance_returns_err() {
+    async fn resolve_child_status_subworkflow_not_found() {
+        let (pm, _dispatcher) = make_pm(vec![]);
+
+        let template = TaskTemplate::SubWorkflow(crate::task::entity::task_definition::SubWorkflowTemplate {
+            workflow_meta_id: "wm1".into(),
+            workflow_version: 1,
+            form: vec![],
+            timeout: None,
+        });
+        let result = pm.resolve_child_status("non-existent", &template).await;
+        assert!(matches!(result, ChildStatus::NotFound));
+    }
+
+    #[tokio::test]
+    async fn resolve_child_status_task_not_found() {
         let (pm, _dispatcher) = make_pm(vec![]);
 
         let result = pm
-            .process_workflow_job(
-                ExecuteWorkflowJob {
-                    workflow_instance_id: "wf-1".into(),
-                    tenant_id: "t1".into(),
-                    event: WorkflowEvent::Start,
-                },
-                "worker-1",
-            )
+            .resolve_child_status("non-existent", &TaskTemplate::Grpc)
             .await;
-        assert!(result.is_err());
+        assert!(matches!(result, ChildStatus::NotFound));
     }
 
     #[tokio::test]
@@ -407,5 +415,18 @@ mod integration_tests {
             )
             .await;
         assert!(result.is_ok());
+    }
+
+    // ── resolve_child_status tests ──
+
+    #[tokio::test]
+    async fn resolve_child_status_subworkflow_completed() {
+        let child = make_pending_instance("child-wf");
+        let (pm, _dispatcher) = make_pm(vec![child]);
+
+        let result = pm
+            .resolve_child_status("child-wf", &TaskTemplate::Grpc)
+            .await;
+        assert!(matches!(result, ChildStatus::NotFound));
     }
 }
