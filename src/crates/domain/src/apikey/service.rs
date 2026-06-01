@@ -16,6 +16,26 @@ fn hash_api_key(full_key: &str) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+pub fn validate_key_entity(
+    full_key: &str,
+    entity: &ApiKeyEntity,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), &'static str> {
+    let h = hash_api_key(full_key);
+    if h != entity.key_hash {
+        return Err("invalid api key");
+    }
+    if entity.status != ApiKeyStatus::Active {
+        return Err("api key is not active");
+    }
+    if let Some(exp) = entity.expires_at {
+        if exp < now {
+            return Err("api key has expired");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25,6 +45,59 @@ mod tests {
         let h1 = hash_api_key("test-key-123");
         let h2 = hash_api_key("test-key-123");
         assert_eq!(h1, h2);
+    }
+
+    fn make_entity(status: ApiKeyStatus, expire: Option<chrono::DateTime<Utc>>) -> ApiKeyEntity {
+        let now = Utc::now();
+        ApiKeyEntity {
+            id: "id-1".into(),
+            tenant_id: "t1".into(),
+            name: "test".into(),
+            key_prefix: "wfk_tes1".into(),
+            key_hash: hash_api_key("wfk_test1234567"),
+            role: TenantRole::Developer,
+            expires_at: expire,
+            token_ttl_secs: 3600,
+            last_used_at: None,
+            status,
+            created_by: "admin".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn validate_active_key_ok() {
+        let entity = make_entity(ApiKeyStatus::Active, None);
+        assert!(validate_key_entity("wfk_test1234567", &entity, Utc::now()).is_ok());
+    }
+
+    #[test]
+    fn validate_wrong_hash_err() {
+        let entity = make_entity(ApiKeyStatus::Active, None);
+        assert!(validate_key_entity("wrong_key", &entity, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn validate_revoked_status_err() {
+        let entity = make_entity(ApiKeyStatus::Revoked, None);
+        assert!(validate_key_entity("wfk_test1234567", &entity, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn validate_expired_key_err() {
+        use chrono::Duration;
+        let past = Utc::now() - Duration::hours(1);
+        let entity = make_entity(ApiKeyStatus::Active, Some(past));
+        assert!(validate_key_entity("wfk_test1234567", &entity, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn validate_not_yet_expired_ok() {
+        use chrono::Duration;
+        let future = Utc::now() + Duration::hours(1);
+        let entity = make_entity(ApiKeyStatus::Active, Some(future));
+        assert!(validate_key_entity("wfk_test1234567", &entity, Utc::now()).is_ok());
     }
 }
 
@@ -84,18 +157,8 @@ impl ApiKeyService {
             return Err("invalid api key".into());
         }
         let entity = self.repository.get_by_prefix(&prefix).await?;
-        let h = hash_api_key(full_key);
-        if h != entity.key_hash {
-            return Err("invalid api key".into());
-        }
-        if entity.status != ApiKeyStatus::Active {
-            return Err("api key is not active".into());
-        }
-        if let Some(exp) = entity.expires_at {
-            if exp < Utc::now() {
-                return Err("api key has expired".into());
-            }
-        }
+        validate_key_entity(full_key, &entity, Utc::now())
+            .map_err(|msg| RepositoryError::from(msg))?;
         let mut updated = entity;
         updated.last_used_at = Some(Utc::now());
         updated.updated_at = Utc::now();

@@ -290,4 +290,18 @@ mod tests {
         let body = serde_json::json!({});
         assert!(HttpTaskExecutor::evaluate_condition(&body, "unknown_var > 0").is_err());
     }
+
+    #[test]
+    fn build_request_methods_and_url() {
+        let client = reqwest::Client::new();
+        let headers = serde_json::Map::new();
+        let req = HttpTaskExecutor::build_request(
+            &client, "http://example.com", &HttpMethod::Get, &headers, &None, 0,
+        );
+        // reqwest's RequestBuilder doesn't expose method directly, but we check it builds without panicking
+        let req = HttpTaskExecutor::build_request(
+            &client, "http://example.com", &HttpMethod::Post, &headers, &None, 10,
+        );
+        let _req = req; // just verify it doesn't panic
+    }
 }
