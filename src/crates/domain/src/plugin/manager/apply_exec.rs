@@ -10,6 +10,7 @@
 use super::PluginManager;
 use super::loop_action::LoopAction;
 use crate::plugin::interface::ExecutionResult;
+use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob};
 use crate::shared::workflow::WorkflowInstanceStatus;
 use crate::workflow::entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity};
 use tracing::{error, warn};
@@ -50,6 +51,47 @@ impl PluginManager {
         }
     }
 
+    fn emit_node_notification(
+        &self,
+        instance: &WorkflowInstanceEntity,
+        node_index: usize,
+    ) {
+        let node = &instance.nodes[node_index];
+        let event_type = match &node.status {
+            NodeExecutionStatus::Success => "node.success",
+            NodeExecutionStatus::Failed => "node.failed",
+            NodeExecutionStatus::Skipped => "node.skipped",
+            _ => return,
+        };
+        self.emit_notification(event_type, Some(&instance.workflow_meta_id), None,
+            super::workflow::make_node_payload(instance, node));
+    }
+
+    async fn dispatch_all_jobs(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_index: usize,
+        dispatch_jobs: Vec<ExecuteTaskJob>,
+        dispatch_workflow_jobs: Vec<ExecuteWorkflowJob>,
+    ) -> anyhow::Result<()> {
+        for job in &dispatch_jobs {
+            self.ensure_task_instance_for_job(instance, node_index, job).await?;
+        }
+        for job in dispatch_jobs {
+            if let Err(e) = self.dispatcher.dispatch_task(job.clone()).await {
+                error!(task_instance_id = %job.task_instance_id, error = %e, "failed to dispatch task");
+                return Err(e.into());
+            }
+        }
+        for job in dispatch_workflow_jobs {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job.clone()).await {
+                error!(workflow_instance_id = %job.workflow_instance_id, error = %e, "failed to dispatch workflow");
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn apply_exec_result(
         &self,
         instance: &mut WorkflowInstanceEntity,
@@ -63,64 +105,9 @@ impl PluginManager {
         instance.updated_at = chrono::Utc::now();
         self.save_instance_and_bump_epoch(instance).await?;
 
-        let node = &instance.nodes[node_index];
-        match &node.status {
-            NodeExecutionStatus::Success => {
-                self.emit_notification(
-                    "node.success",
-                    Some(&instance.workflow_meta_id),
-                    None,
-                    super::workflow::make_node_payload(instance, node),
-                );
-            }
-            NodeExecutionStatus::Failed => {
-                self.emit_notification(
-                    "node.failed",
-                    Some(&instance.workflow_meta_id),
-                    None,
-                    super::workflow::make_node_payload(instance, node),
-                );
-            }
-            NodeExecutionStatus::Skipped => {
-                self.emit_notification(
-                    "node.skipped",
-                    Some(&instance.workflow_meta_id),
-                    None,
-                    super::workflow::make_node_payload(instance, node),
-                );
-            }
-            _ => {}
-        }
-
-        // After successful persistence, dispatch outbound events based on the transition
-        self.dispatch_outbound_for_transition(instance, &old_status)
-            .await;
-
-        for job in &exec_result.dispatch_jobs {
-            self.ensure_task_instance_for_job(instance, node_index, job)
-                .await?;
-        }
-
-        for job in exec_result.dispatch_jobs {
-            if let Err(e) = self.dispatcher.dispatch_task(job.clone()).await {
-                error!(
-                    task_instance_id = %job.task_instance_id,
-                    error = %e,
-                    "failed to dispatch task"
-                );
-                return Err(e.into());
-            }
-        }
-        for job in exec_result.dispatch_workflow_jobs {
-            if let Err(e) = self.dispatcher.dispatch_workflow(job.clone()).await {
-                error!(
-                    workflow_instance_id = %job.workflow_instance_id,
-                    error = %e,
-                    "failed to dispatch workflow"
-                );
-                return Err(e.into());
-            }
-        }
+        Self::emit_node_notification(self, instance, node_index);
+        self.dispatch_outbound_for_transition(instance, &old_status).await;
+        self.dispatch_all_jobs(instance, node_index, exec_result.dispatch_jobs, exec_result.dispatch_workflow_jobs).await?;
 
         Ok(action)
     }

@@ -809,65 +809,55 @@ impl PluginManager {
     ) -> anyhow::Result<LoopOutcome> {
         match node_status {
             NodeExecutionStatus::Success | NodeExecutionStatus::Skipped => {
-                if let Some(next) = instance.nodes[node_index].next_node.clone() {
-                    instance.current_node = next;
-                    self.save_instance_and_bump_epoch(instance).await?;
-                    Ok(LoopOutcome::Continue)
-                } else {
-                    info!(
-                        workflow_instance_id = %instance.workflow_instance_id,
-                        "workflow completed"
-                    );
-                    let old_status = self
-                        .workflow_instance_svc
-                        .transition_instance(instance, WorkflowInstanceStatus::Completed)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                    self.dispatch_outbound_for_transition(instance, &old_status)
-                        .await;
-                    self.emit_notification(
-                        "workflow.completed",
-                        Some(&instance.workflow_meta_id),
-                        None,
-                        make_workflow_payload(instance),
-                    );
-                    Ok(LoopOutcome::Stop)
-                }
+                self.handle_node_success_or_skip(instance, node_index).await
             }
             NodeExecutionStatus::Failed => {
-                error!(
-                    workflow_instance_id = %instance.workflow_instance_id,
-                    node_id = %current_node_id,
-                    "workflow failed at node"
-                );
-                let old_status = self
-                    .workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Failed)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                self.dispatch_outbound_for_transition(instance, &old_status)
-                    .await;
-                self.emit_notification(
-                    "workflow.failed",
-                    Some(&instance.workflow_meta_id),
-                    None,
-                    make_workflow_payload(instance),
-                );
-                Ok(LoopOutcome::Stop)
+                error!(workflow_instance_id = %instance.workflow_instance_id, node_id = %current_node_id, "workflow failed at node");
+                self.finish_workflow(instance, WorkflowInstanceStatus::Failed, "workflow.failed").await
             }
-            // 我们工作流只做编排，所以碰到这些状态则标识需要外部或者节点完成之后通知我们。因此我们直接返回stop。
-            NodeExecutionStatus::Suspended
-            | NodeExecutionStatus::Await
-            | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
-            NodeExecutionStatus::Pending => {
-                instance.nodes[node_index].status = NodeExecutionStatus::Running;
-                self.save_instance_and_bump_epoch(instance).await?;
+            NodeExecutionStatus::Suspended | NodeExecutionStatus::Await | NodeExecutionStatus::Running => Ok(LoopOutcome::Stop),
+            NodeExecutionStatus::Pending => self.handle_node_pending(instance, node_index).await,
+        }
+    }
 
-                match self.run_node(instance, node_index).await? {
-                    LoopAction::Advance | LoopAction::Retry => Ok(LoopOutcome::Continue),
-                    LoopAction::Done => Ok(LoopOutcome::Stop),
-                }
-            }
+    async fn finish_workflow(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        status: WorkflowInstanceStatus,
+        event_type: &str,
+    ) -> anyhow::Result<LoopOutcome> {
+        let old_status = self.workflow_instance_svc
+            .transition_instance(instance, status)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        self.dispatch_outbound_for_transition(instance, &old_status).await;
+        self.emit_notification(event_type, Some(&instance.workflow_meta_id), None, make_workflow_payload(instance));
+        Ok(LoopOutcome::Stop)
+    }
+
+    async fn handle_node_success_or_skip(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_index: usize,
+    ) -> anyhow::Result<LoopOutcome> {
+        if let Some(next) = instance.nodes[node_index].next_node.clone() {
+            instance.current_node = next;
+            self.save_instance_and_bump_epoch(instance).await?;
+            return Ok(LoopOutcome::Continue);
+        }
+        self.finish_workflow(instance, WorkflowInstanceStatus::Completed, "workflow.completed").await
+    }
+
+    async fn handle_node_pending(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_index: usize,
+    ) -> anyhow::Result<LoopOutcome> {
+        instance.nodes[node_index].status = NodeExecutionStatus::Running;
+        self.save_instance_and_bump_epoch(instance).await?;
+        match self.run_node(instance, node_index).await? {
+            LoopAction::Advance | LoopAction::Retry => Ok(LoopOutcome::Continue),
+            LoopAction::Done => Ok(LoopOutcome::Stop),
         }
     }
 

@@ -87,6 +87,87 @@ fn exec_status_to_task_instance_status(
     }
 }
 
+async fn fail_and_dispatch(
+    task_svc: &TaskInstanceService,
+    manager: &PluginManager,
+    job: &ExecuteTaskJob,
+    task_id: &str,
+    error: String,
+    elapsed_ms: u64,
+    old_status: &domain::shared::workflow::TaskInstanceStatus,
+) -> Result<(), std::io::Error> {
+    if let Err(e) = task_svc.fail_with_error(task_id, error.clone(), Some(elapsed_ms)).await {
+        warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
+    }
+    let failed = domain::shared::workflow::TaskInstanceStatus::Failed;
+    dispatch_outbound(&manager, &job, old_status, &failed, None, Some(error), None).await
+}
+
+async fn dispatch_outbound(
+    manager: &PluginManager,
+    job: &ExecuteTaskJob,
+    old_status: &domain::shared::workflow::TaskInstanceStatus,
+    new_status: &domain::shared::workflow::TaskInstanceStatus,
+    output: Option<serde_json::Value>,
+    error_message: Option<String>,
+    input: Option<serde_json::Value>,
+) -> Result<(), std::io::Error> {
+    if let Some(outbound) = build_outbound_for_task(job, old_status, new_status, output, error_message, input) {
+        manager.dispatcher().dispatch_workflow(outbound).await.map_err(|e| {
+            error!(task_instance_id = %job.task_instance_id, error = %e, "failed to dispatch outbound event");
+            std::io::Error::other(e)
+        })?;
+    }
+    Ok(())
+}
+
+async fn complete_or_fail_and_dispatch(
+    task_svc: &TaskInstanceService,
+    manager: &PluginManager,
+    job: &ExecuteTaskJob,
+    exec_result: &domain::task::interface::TaskExecutionResult,
+    execution_duration: u64,
+    old_status: &domain::shared::workflow::TaskInstanceStatus,
+) -> Result<(), std::io::Error> {
+    let new_status = exec_status_to_task_instance_status(&exec_result.status);
+    match new_status {
+        domain::shared::workflow::TaskInstanceStatus::Completed => {
+            if let Err(e) = task_svc.complete_with_output(
+                &job.task_instance_id, exec_result.output.clone(), exec_result.input.clone(), Some(execution_duration),
+            ).await {
+                warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
+            }
+        }
+        _ => {
+            let error_msg = exec_result.error_message.clone().unwrap_or_default();
+            if let Err(e) = task_svc.fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration)).await {
+                warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
+            }
+        }
+    };
+    dispatch_outbound(manager, job, old_status, &new_status, exec_result.output.clone(), exec_result.error_message.clone(), exec_result.input.clone()).await
+}
+
+async fn execute_or_fail(
+    task_manager: &TaskManager,
+    task_svc: &TaskInstanceService,
+    manager: &PluginManager,
+    job: &ExecuteTaskJob,
+    task_instance_entity: &domain::task::entity::task_definition::TaskInstanceEntity,
+    start: Instant,
+    old_task_status: &domain::shared::workflow::TaskInstanceStatus,
+) -> Result<domain::task::interface::TaskExecutionResult, std::io::Error> {
+    match task_manager.execute_task(task_instance_entity).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            error!(task_instance_id = %job.task_instance_id, task_type = ?task_instance_entity.task_type, error = %e, "task execution failed");
+            fail_and_dispatch(task_svc, manager, job, &job.task_instance_id,
+                e.to_string(), start.elapsed().as_millis() as u64, old_task_status).await?;
+            Err(std::io::Error::other("task execution failed"))
+        }
+    }
+}
+
 async fn handle_task_job(
     job: ExecuteTaskJob,
     ctx: Data<(Arc<PluginManager>, Arc<TaskManager>)>,
@@ -107,106 +188,13 @@ async fn handle_task_job(
 
     let old_task_status = domain::shared::workflow::TaskInstanceStatus::Running;
 
-    let exec_result = match task_manager.execute_task(&task_instance_entity).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(
-                task_instance_id = %job.task_instance_id,
-                task_type = ?task_instance_entity.task_type,
-                error = %e,
-                "task execution failed"
-            );
-            // CAS: running -> failed
-            if let Err(cas_err) = task_svc
-                .fail_with_error(
-                    &job.task_instance_id,
-                    e.to_string(),
-                    Some(start.elapsed().as_millis() as u64),
-                )
-                .await
-            {
-                warn!(task_instance_id = %job.task_instance_id, error = %cas_err, "CAS fail_with_error failed (may already be terminal)");
-            }
-
-            let new_status = domain::shared::workflow::TaskInstanceStatus::Failed;
-            if let Some(outbound) = build_outbound_for_task(
-                &job,
-                &old_task_status,
-                &new_status,
-                None,
-                Some(e.to_string()),
-                None,
-            ) {
-                if let Err(dispatch_err) = manager.dispatcher().dispatch_workflow(outbound).await {
-                    error!(
-                        task_instance_id = %job.task_instance_id,
-                        error = %dispatch_err,
-                        "failed to dispatch outbound event to parent"
-                    );
-                    return Err(std::io::Error::other(dispatch_err));
-                }
-            }
-
-            return Ok(());
-        }
-    };
+    let exec_result = execute_or_fail(task_manager, task_svc, &manager, &job, &task_instance_entity, start, &old_task_status).await
+        .map_err(|_| std::io::Error::other("task execution failed"))?;
     let execution_duration = start.elapsed().as_millis() as u64;
 
-    // Determine new task status
-    let new_task_status = {
-        let status = exec_status_to_task_instance_status(&exec_result.status);
-        match status {
-            domain::shared::workflow::TaskInstanceStatus::Completed => {
-                if let Err(e) = task_svc
-                    .complete_with_output(
-                        &job.task_instance_id,
-                        exec_result.output.clone(),
-                        exec_result.input.clone(),
-                        Some(execution_duration),
-                    )
-                    .await
-                {
-                    warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS complete_with_output failed");
-                }
-                domain::shared::workflow::TaskInstanceStatus::Completed
-            }
-            _ => {
-                let error_msg = exec_result.error_message.clone().unwrap_or_default();
-                if let Err(e) = task_svc
-                    .fail_with_error(&job.task_instance_id, error_msg, Some(execution_duration))
-                    .await
-                {
-                    warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
-                }
-                domain::shared::workflow::TaskInstanceStatus::Failed
-            }
-        }
-    };
+    info!(task_instance_id = %job.task_instance_id, status = ?exec_result.status, "task completed");
 
-    info!(
-        task_instance_id = %job.task_instance_id,
-        status = ?exec_result.status,
-        "task completed"
-    );
-
-    // Dispatch outbound event to parent workflow using unified transition logic
-    if let Some(outbound) = build_outbound_for_task(
-        &job,
-        &old_task_status,
-        &new_task_status,
-        exec_result.output,
-        exec_result.error_message,
-        exec_result.input,
-    ) {
-        if let Err(e) = manager.dispatcher().dispatch_workflow(outbound).await {
-            error!(
-                task_instance_id = %job.task_instance_id,
-                error = %e,
-                "failed to dispatch outbound event to parent"
-            );
-            return Err(std::io::Error::other(e));
-        }
-    }
+    complete_or_fail_and_dispatch(task_svc, &manager, &job, &exec_result, execution_duration, &old_task_status).await?;
 
     Ok(())
 }

@@ -24,18 +24,11 @@ struct HttpResponse {
 
 impl HttpTaskExecutor {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        Self { client: Client::new() }
     }
 
-    fn is_http_success(status_code: u16) -> bool {
-        (200..300).contains(&status_code)
-    }
-
-    fn should_retry(attempt: u32, retry_count: u32) -> bool {
-        attempt < retry_count
-    }
+    fn is_http_success(status_code: u16) -> bool { (200..300).contains(&status_code) }
+    fn should_retry(attempt: u32, retry_count: u32) -> bool { attempt < retry_count }
 
     fn build_request(
         client: &Client,
@@ -159,6 +152,61 @@ impl HttpTaskExecutor {
         }
         output
     }
+
+    async fn execute_http_retry_loop(
+        &self,
+        url: &str,
+        method: &HttpMethod,
+        headers_obj: &serde_json::Map<String, serde_json::Value>,
+        body_json: &Option<serde_json::Value>,
+        timeout: u32,
+        retry_count: u32,
+        retry_delay: u32,
+        success_condition: &Option<String>,
+        task_id: &str,
+        input_snapshot: serde_json::Value,
+    ) -> anyhow::Result<TaskExecutionResult> {
+        let mut last_error: Option<String> = None;
+        let mut last_output: Option<serde_json::Value> = None;
+        let attempts = retry_count + 1;
+
+        for attempt in 0..attempts {
+            let resp = match self.send_request(url, method, headers_obj, body_json, timeout).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(task_instance_id = %task_id, url = %url, attempt = attempt + 1, error = %e, "HTTP request failed");
+                    last_error = Some(e);
+                    if Self::should_retry(attempt, retry_count) && retry_delay > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(retry_delay as u64)).await;
+                    }
+                    continue;
+                }
+            };
+
+            if !Self::is_http_success(resp.status_code) {
+                warn!(task_instance_id = %task_id, url = %url, status_code = resp.status_code, attempt = attempt + 1, "HTTP task returned non-2xx status");
+                last_error = Some(format!("HTTP {}: {}", resp.status_code, resp.body));
+            } else if let Some(condition) = success_condition {
+                let passed = self.evaluate_success_condition(task_id, &resp.body, condition);
+                let output = Self::build_response_output(resp.status_code, &resp.body, resp.duration_ms, attempt, Some((condition, passed)));
+                if passed {
+                    return Ok(TaskExecutionResult { status: NodeExecutionStatus::Success, input: Some(input_snapshot), output: Some(output), error_message: None });
+                }
+                last_error = Some(format!("success_condition `{}` not met", condition));
+                last_output = Some(output);
+            } else {
+                let output = Self::build_response_output(resp.status_code, &resp.body, resp.duration_ms, attempt, None);
+                return Ok(TaskExecutionResult { status: NodeExecutionStatus::Success, input: Some(input_snapshot), output: Some(output), error_message: None });
+            }
+
+            if Self::should_retry(attempt, retry_count) && retry_delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(retry_delay as u64)).await;
+            }
+        }
+
+        let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+        Ok(TaskExecutionResult { status: NodeExecutionStatus::Failed, input: Some(input_snapshot), output: last_output, error_message: Some(error_msg) })
+    }
 }
 
 #[async_trait]
@@ -174,102 +222,18 @@ impl TaskExecutor for HttpTaskExecutor {
                 return Err(anyhow::anyhow!("Expected Http config but got other"));
             }
         };
-
         let empty_ctx = json!({});
         let (input_snapshot, url, method, headers_obj, body_json) =
             effective_http_request(task_instance, config, &empty_ctx);
-
         if url.is_empty() {
             return Err(anyhow::anyhow!("HTTP task has empty url after resolution"));
         }
-
-        let mut last_error: Option<String> = None;
-        let mut last_output: Option<serde_json::Value> = None;
-        let attempts = config.retry_count + 1;
-        let tid = task_instance.task_instance_id.as_str();
-
-        for attempt in 0..attempts {
-            let resp = match self
-                .send_request(&url, &method, &headers_obj, &body_json, config.timeout)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(task_instance_id = %tid, url = %url, attempt = attempt + 1, error = %e, "HTTP request failed");
-                    last_error = Some(e);
-                    if Self::should_retry(attempt, config.retry_count) {
-                        let delay = config.retry_delay as u64;
-                        if delay > 0 {
-                            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                        }
-                    }
-                    continue;
-                }
-            };
-
-            if !Self::is_http_success(resp.status_code) {
-                warn!(task_instance_id = %tid, url = %url, status_code = resp.status_code, attempt = attempt + 1, "HTTP task returned non-2xx status");
-                last_error = Some(format!("HTTP {}: {}", resp.status_code, resp.body));
-            } else if let Some(ref condition) = config.success_condition {
-                let passed = self.evaluate_success_condition(tid, &resp.body, condition);
-                let output = Self::build_response_output(
-                    resp.status_code,
-                    &resp.body,
-                    resp.duration_ms,
-                    attempt,
-                    Some((condition, passed)),
-                );
-
-                if passed {
-                    debug!(task_instance_id = %tid, url = %url, status_code = resp.status_code, condition = %condition, duration_ms = resp.duration_ms, "HTTP request succeeded (condition met)");
-                    return Ok(TaskExecutionResult {
-                        status: NodeExecutionStatus::Success,
-                        input: Some(input_snapshot),
-                        output: Some(output),
-                        error_message: None,
-                    });
-                }
-
-                warn!(task_instance_id = %tid, url = %url, condition = %condition, attempt = attempt + 1, "success_condition not met");
-                last_error = Some(format!(
-                    "success_condition `{}` not met (body: {})",
-                    condition, resp.body
-                ));
-                last_output = Some(output);
-            } else {
-                debug!(task_instance_id = %tid, url = %url, status_code = resp.status_code, duration_ms = resp.duration_ms, "HTTP request succeeded");
-                let output = Self::build_response_output(
-                    resp.status_code,
-                    &resp.body,
-                    resp.duration_ms,
-                    attempt,
-                    None,
-                );
-                return Ok(TaskExecutionResult {
-                    status: NodeExecutionStatus::Success,
-                    input: Some(input_snapshot),
-                    output: Some(output),
-                    error_message: None,
-                });
-            }
-
-            if attempt < config.retry_count {
-                let delay = config.retry_delay as u64;
-                if delay > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                }
-            }
-        }
-
-        let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
-        error!(task_instance_id = %tid, url = %url, attempts = attempts, error = %error_msg, "HTTP task failed after all retries");
-
-        Ok(TaskExecutionResult {
-            status: NodeExecutionStatus::Failed,
-            input: Some(input_snapshot),
-            output: last_output,
-            error_message: Some(error_msg),
-        })
+        self.execute_http_retry_loop(
+            &url, &method, &headers_obj, &body_json,
+            config.timeout, config.retry_count, config.retry_delay,
+            &config.success_condition,
+            &task_instance.task_instance_id, input_snapshot,
+        ).await
     }
 
     fn task_type(&self) -> TaskType {
