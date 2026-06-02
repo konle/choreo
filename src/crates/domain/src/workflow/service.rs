@@ -648,83 +648,51 @@ impl WorkflowInstanceService {
         if !output.is_object() {
             return Err("output must be a JSON object".to_string());
         }
-
         let mut inst = self
             .get_workflow_instance_scoped(tenant_id, workflow_instance_id)
             .await
             .map_err(|e| e.to_string())?;
-
-        if inst.get_current_node() != node_id {
-            return Err("node_id must match current_node".to_string());
-        }
-
         let validated = validate_node_for_retry_or_skip(&inst, node_id, child_task_id.as_deref(), "skipped")?;
-        let idx = validated.idx;
-        let node = &inst.nodes[idx];
 
         if validated.is_container {
-            let cid = child_task_id.as_deref().ok_or_else(|| {
-                "child_task_id is required when skipping a Parallel/ForkJoin child task".to_string()
-            })?;
-
-            let prefix = format!("{}-{}-", workflow_instance_id, node_id);
-            if !cid.starts_with(&prefix) {
-                return Err(format!(
-                    "child_task_id '{}' does not belong to container node '{}'",
-                    cid, node_id
-                ));
-            }
-
-            if !matches!(
-                inst.status,
-                WorkflowInstanceStatus::Failed | WorkflowInstanceStatus::Await
-            ) {
-                return Err(format!(
-                    "workflow instance must be Failed or Await to skip container child, got {:?}",
-                    inst.status
-                ));
-            }
-
-            // For Failed instances (max_failures breaker tripped), transition back
-            // to Await so the workflow worker can process the incoming NodeCallback.
-            if inst.status == WorkflowInstanceStatus::Failed {
-                inst.status = WorkflowInstanceStatus::Await;
-                inst.updated_at = Utc::now();
-                self.save_workflow_instance(&inst)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-
-            self.mark_task_instance_skipped(cid, &output).await;
-
-            return self
-                .get_workflow_instance(workflow_instance_id.to_string())
-                .await
-                .map_err(|e| e.to_string());
+            return self.skip_container_child(inst, child_task_id.as_deref().unwrap(), &output, workflow_instance_id).await;
         }
+        self.skip_atomic_node(&mut inst, validated.idx, &output, workflow_instance_id).await
+    }
 
-        // ── ordinary (atomic) node skip ──
-
-        if !matches!(
-            inst.status,
-            WorkflowInstanceStatus::Failed | WorkflowInstanceStatus::Suspended
-        ) {
-            return Err(format!(
-                "workflow instance must be Failed or Suspended, got {:?}",
-                inst.status
-            ));
+    async fn skip_container_child(
+        &self,
+        mut inst: WorkflowInstanceEntity,
+        cid: &str,
+        output: &JsonValue,
+        workflow_instance_id: &str,
+    ) -> Result<WorkflowInstanceEntity, String> {
+        if !matches!(inst.status, WorkflowInstanceStatus::Failed | WorkflowInstanceStatus::Await) {
+            return Err(format!("workflow instance must be Failed or Await to skip container child, got {:?}", inst.status));
         }
-
-        if !matches!(
-            node.status,
-            NodeExecutionStatus::Failed | NodeExecutionStatus::Suspended
-        ) {
-            return Err(format!(
-                "node must be Failed or Suspended to skip, got {:?}",
-                node.status
-            ));
+        if inst.status == WorkflowInstanceStatus::Failed {
+            inst.status = WorkflowInstanceStatus::Await;
+            inst.updated_at = Utc::now();
+            self.save_workflow_instance(&inst).await.map_err(|e| e.to_string())?;
         }
+        self.mark_task_instance_skipped(cid, output).await;
+        self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
+    }
 
+    async fn skip_atomic_node(
+        &self,
+        inst: &mut WorkflowInstanceEntity,
+        idx: usize,
+        output: &JsonValue,
+        workflow_instance_id: &str,
+    ) -> Result<WorkflowInstanceEntity, String> {
+        let node = &inst.nodes[idx];
+        if !matches!(inst.status, WorkflowInstanceStatus::Failed | WorkflowInstanceStatus::Suspended) {
+            return Err(format!("workflow instance must be Failed or Suspended, got {:?}", inst.status));
+        }
+        if !matches!(node.status, NodeExecutionStatus::Failed | NodeExecutionStatus::Suspended) {
+            return Err(format!("node must be Failed or Suspended to skip, got {:?}", node.status));
+        }
         inst.nodes[idx].status = NodeExecutionStatus::Skipped;
         inst.nodes[idx].task_instance.output = Some(output.clone());
         inst.nodes[idx].task_instance.task_status = TaskInstanceStatus::Skipped;
@@ -732,29 +700,15 @@ impl WorkflowInstanceService {
         inst.nodes[idx].error_message = None;
         inst.nodes[idx].updated_at = Utc::now();
         inst.nodes[idx].task_instance.updated_at = Utc::now();
-
         let task_id = inst.nodes[idx].task_instance.task_instance_id.clone();
-        self.mark_task_instance_skipped(&task_id, &output).await;
-
-        if !inst
-            .status
-            .can_transition_to(&WorkflowInstanceStatus::Pending)
-        {
-            return Err(format!(
-                "cannot transition workflow status {:?} to Pending",
-                inst.status
-            ));
+        self.mark_task_instance_skipped(&task_id, output).await;
+        if !inst.status.can_transition_to(&WorkflowInstanceStatus::Pending) {
+            return Err(format!("cannot transition workflow status {:?} to Pending", inst.status));
         }
         inst.status = WorkflowInstanceStatus::Pending;
         inst.updated_at = Utc::now();
-
-        self.save_workflow_instance(&inst)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        self.get_workflow_instance(workflow_instance_id.to_string())
-            .await
-            .map_err(|e| e.to_string())
+        self.save_workflow_instance(inst).await.map_err(|e| e.to_string())?;
+        self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
     }
 
     // ── Retry node (symmetric to skip_workflow_node) ──
@@ -774,100 +728,73 @@ impl WorkflowInstanceService {
             .await
             .map_err(|e| e.to_string())?;
 
-        if inst.get_current_node() != node_id {
-            return Err("node_id must match current_node".to_string());
-        }
-
         let validated = validate_node_for_retry_or_skip(&inst, node_id, child_task_id.as_deref(), "retried")?;
 
         if validated.is_container {
-            let cid = child_task_id.as_deref().unwrap();
-
-            if matches!(
-                inst.status,
-                WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Canceled
-            ) {
-                return Err(format!(
-                    "cannot retry container child: workflow is {:?}",
-                    inst.status
-                ));
-            }
-
-            // CAS reset child TaskInstance: Failed → Pending
-            // Dispatching (task execution + RetryContainerChild event) is handled by the caller (API handler)
-            if let Err(e) = self.task_instance_svc.retry_instance(cid).await {
-                return Err(format!(
-                    "child task '{}' cannot be retried (not Failed or CAS conflict): {}",
-                    cid, e
-                ));
-            }
-            // Clear task_instance output/error but preserve input (resolved HTTP snapshot)
-            if let Ok(mut ti) = self
-                .task_instance_svc
-                .get_task_instance_entity(cid.to_string())
-                .await
-            {
-                ti.output = None;
-                ti.error_message = None;
-                let _ = self.task_instance_svc.update_task_instance_entity(ti).await;
-            }
-
-            return self
-                .get_workflow_instance(workflow_instance_id.to_string())
-                .await
-                .map_err(|e| e.to_string());
+            return self.retry_container_child(inst, child_task_id.as_deref().unwrap(), workflow_instance_id).await;
         }
 
-        // ── ordinary (atomic) node retry ──
+        self.retry_atomic_node(&mut inst, validated.idx, workflow_instance_id).await
+    }
 
-        let idx = validated.idx;
+    async fn retry_container_child(
+        &self,
+        mut inst: WorkflowInstanceEntity,
+        cid: &str,
+        workflow_instance_id: &str,
+    ) -> Result<WorkflowInstanceEntity, String> {
+        if matches!(
+            inst.status,
+            WorkflowInstanceStatus::Completed | WorkflowInstanceStatus::Canceled
+        ) {
+            return Err(format!(
+                "cannot retry container child: workflow is {:?}", inst.status
+            ));
+        }
+        if let Err(e) = self.task_instance_svc.retry_instance(cid).await {
+            return Err(format!(
+                "child task '{}' cannot be retried (not Failed or CAS conflict): {}",
+                cid, e
+            ));
+        }
+        if let Ok(mut ti) = self.task_instance_svc.get_task_instance_entity(cid.to_string()).await {
+            ti.output = None;
+            ti.error_message = None;
+            let _ = self.task_instance_svc.update_task_instance_entity(ti).await;
+        }
+        self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
+    }
+
+    async fn retry_atomic_node(
+        &self,
+        inst: &mut WorkflowInstanceEntity,
+        idx: usize,
+        workflow_instance_id: &str,
+    ) -> Result<WorkflowInstanceEntity, String> {
         let node = &inst.nodes[idx];
-
         if !matches!(inst.status, WorkflowInstanceStatus::Failed) {
-            return Err(format!(
-                "workflow instance must be Failed to retry atomic node, got {:?}",
-                inst.status
-            ));
+            return Err(format!("workflow instance must be Failed to retry atomic node, got {:?}", inst.status));
         }
-
         if !matches!(node.status, NodeExecutionStatus::Failed) {
-            return Err(format!(
-                "node must be Failed to retry, got {:?}",
-                node.status
-            ));
+            return Err(format!("node must be Failed to retry, got {:?}", node.status));
         }
-
-        // CAS reset independent task_instance: Failed → Pending
         let task_id = inst.nodes[idx].task_instance.task_instance_id.clone();
         if let Err(e) = self.task_instance_svc.retry_instance(&task_id).await {
             warn!(task_instance_id = %task_id, error = %e, "failed to CAS reset task_instance for retry");
         }
-
         inst.nodes[idx].status = NodeExecutionStatus::Pending;
         inst.nodes[idx].error_message = None;
         inst.nodes[idx].task_instance.output = None;
         inst.nodes[idx].task_instance.error_message = None;
         inst.nodes[idx].updated_at = Utc::now();
-
-        let transition_result = inst
-            .transition_status(WorkflowInstanceStatus::Pending)
-            .map_err(|e| e)?;
-
-        self.save_workflow_instance(&inst)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Dispatch outbound events (ChildRevived to parent if this is a child workflow)
+        let transition_result = inst.transition_status(WorkflowInstanceStatus::Pending).map_err(|e| e)?;
+        self.save_workflow_instance(inst).await.map_err(|e| e.to_string())?;
         for job in transition_result.into_dispatch_jobs() {
             if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
-                warn!(workflow_instance_id = %workflow_instance_id, error = %e,
-                    "failed to dispatch outbound ChildRevived event");
+                warn!(workflow_instance_id = %workflow_instance_id, error = %e, "failed to dispatch");
             }
         }
-
-        self.get_workflow_instance(workflow_instance_id.to_string())
-            .await
-            .map_err(|e| e.to_string())
+        self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
     }
 
     // ── Sweeper helpers ─────────────────────────────────────────────
