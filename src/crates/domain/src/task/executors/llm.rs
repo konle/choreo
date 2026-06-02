@@ -19,6 +19,99 @@ impl LlmTaskExecutor {
         }
     }
 
+    fn is_success_status(status_code: u16) -> bool {
+        (200..300).contains(&status_code)
+    }
+
+    fn is_rate_limited(status_code: u16) -> bool {
+        status_code == 429
+    }
+
+    fn is_client_error(status_code: u16) -> bool {
+        (400..500).contains(&status_code)
+    }
+
+    fn should_sleep_before_retry(attempt: u32, retry_count: u32, retry_delay: u32) -> bool {
+        attempt < retry_count && retry_delay > 0
+    }
+
+    async fn send_llm_request(
+        client: &Client,
+        url: &str,
+        body: &serde_json::Value,
+        api_key: &str,
+        timeout: u32,
+    ) -> Result<(u16, String), String> {
+        let request = Self::build_llm_request(client, url, body, api_key, timeout);
+        let resp = request.send().await.map_err(|e| e.to_string())?;
+        let status_code = resp.status().as_u16();
+        let resp_body = resp.text().await.unwrap_or_default();
+        Ok((status_code, resp_body))
+    }
+
+    async fn process_llm_response(
+        status_code: u16,
+        resp_body: &str,
+        model: &str,
+        response_format: &Option<LlmResponseFormat>,
+        attempt: u32,
+        total_attempts: u32,
+        retry_delay: u32,
+    ) -> Result<Option<TaskExecutionResult>, String> {
+        if Self::is_success_status(status_code) {
+            match serde_json::from_str::<serde_json::Value>(resp_body) {
+                Ok(resp_json) => match Self::try_build_success_output(&resp_json, model, response_format, attempt) {
+                    Ok(output) => return Ok(Some(TaskExecutionResult {
+                        status: NodeExecutionStatus::Success,
+                        input: None,
+                        output: Some(output),
+                        error_message: None,
+                    })),
+                    Err(e) => {
+                        if Self::should_sleep_before_retry(attempt, total_attempts - 1, retry_delay) {
+                            tokio::time::sleep(std::time::Duration::from_secs(retry_delay as u64)).await;
+                        }
+                        return Err(format!("JsonObject parse error: {}", e));
+                    }
+                },
+                Err(e) => return Err(format!("response parse error: {}", e)),
+            }
+        }
+        if Self::is_rate_limited(status_code) {
+            return Err(format!("rate limited (429): {}", resp_body));
+        }
+        if Self::is_client_error(status_code) {
+            return Ok(Some(TaskExecutionResult {
+                status: NodeExecutionStatus::Failed,
+                input: None,
+                output: None,
+                error_message: Some(format!("client error {}: {}", status_code, resp_body)),
+            }));
+        }
+        Err(format!("server error {}: {}", status_code, resp_body))
+    }
+
+    fn build_llm_request(
+        client: &Client,
+        url: &str,
+        body: &serde_json::Value,
+        api_key: &str,
+        timeout: u32,
+    ) -> reqwest::RequestBuilder {
+        let mut request = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .json(body);
+
+        if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        if timeout > 0 {
+            request = request.timeout(std::time::Duration::from_secs(timeout as u64));
+        }
+        request
+    }
+
     fn build_request_body(
         model: &str,
         system_prompt: &str,
@@ -181,124 +274,38 @@ impl TaskExecutor for LlmTaskExecutor {
         let attempts = config.retry_count + 1;
 
         for attempt in 0..attempts {
-            let mut request = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&body);
+            let (status_code, resp_body) = match Self::send_llm_request(
+                &self.client, &url, &body, api_key, config.timeout,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(e.clone());
+                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
+                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
+                    }
+                    continue;
+                }
+            };
 
-            if !api_key.is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", api_key));
-            }
-
-            if config.timeout > 0 {
-                request = request.timeout(std::time::Duration::from_secs(config.timeout as u64));
-            }
-
-            match request.send().await {
-                Ok(resp) => {
-                    let status_code = resp.status().as_u16();
-                    let resp_body = resp.text().await.unwrap_or_default();
-
-                    if (200..300).contains(&status_code) {
-                        match serde_json::from_str::<serde_json::Value>(&resp_body) {
-                            Ok(resp_json) => {
-                                match Self::try_build_success_output(
-                                    &resp_json,
-                                    model,
-                                    &config.response_format,
-                                    attempt,
-                                ) {
-                                    Ok(output) => {
-                                        debug!(
-                                            task_instance_id = %task_instance.task_instance_id,
-                                            model = %resp_json.get("model").and_then(|v| v.as_str()).unwrap_or(model),
-                                            finish_reason = %resp_json.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                                            "LLM request succeeded"
-                                        );
-
-                                        return Ok(TaskExecutionResult {
-                                            status: NodeExecutionStatus::Success,
-                                            input: Some(input_snapshot),
-                                            output: Some(output),
-                                            error_message: None,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            task_instance_id = %task_instance.task_instance_id,
-                                            attempt = attempt + 1,
-                                            error = %e,
-                                            "LLM returned non-JSON content with JsonObject format"
-                                        );
-                                        last_error = Some(e);
-                                        if attempt < config.retry_count && config.retry_delay > 0 {
-                                            tokio::time::sleep(
-                                                std::time::Duration::from_secs(
-                                                    config.retry_delay as u64,
-                                                ),
-                                            )
-                                            .await;
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    task_instance_id = %task_instance.task_instance_id,
-                                    status_code = status_code,
-                                    error = %e,
-                                    "LLM response is not valid JSON"
-                                );
-                                last_error = Some(format!("LLM response parse error: {}", e));
-                            }
-                        }
-                    } else if status_code == 429 {
-                        warn!(
-                            task_instance_id = %task_instance.task_instance_id,
-                            attempt = attempt + 1,
-                            "LLM rate limited (429)"
-                        );
-                        last_error = Some(format!("Rate limited (429): {}", resp_body));
-                    } else if (400..500).contains(&status_code) && status_code != 429 {
-                        error!(
-                            task_instance_id = %task_instance.task_instance_id,
-                            status_code = status_code,
-                            "LLM client error (4xx), not retrying"
-                        );
-                        return Ok(TaskExecutionResult {
-                            status: NodeExecutionStatus::Failed,
-                            input: Some(input_snapshot),
-                            output: None,
-                            error_message: Some(format!(
-                                "LLM API error {}: {}",
-                                status_code, resp_body
-                            )),
-                        });
-                    } else {
-                        warn!(
-                            task_instance_id = %task_instance.task_instance_id,
-                            status_code = status_code,
-                            attempt = attempt + 1,
-                            "LLM server error"
-                        );
-                        last_error = Some(format!("LLM API error {}: {}", status_code, resp_body));
+            match Self::process_llm_response(
+                status_code, &resp_body, model, &config.response_format,
+                attempt, attempts, config.retry_delay,
+            )
+            .await
+            {
+                Ok(Some(result)) => return Ok(TaskExecutionResult {
+                    input: Some(input_snapshot),
+                    ..result
+                }),
+                Err(e) => {
+                    last_error = Some(e);
+                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
+                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        task_instance_id = %task_instance.task_instance_id,
-                        attempt = attempt + 1,
-                        error = %e,
-                        "LLM request failed"
-                    );
-                    last_error = Some(e.to_string());
-                }
-            }
-
-            if attempt < config.retry_count && config.retry_delay > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
+                _ => {}
             }
         }
 
