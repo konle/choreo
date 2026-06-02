@@ -35,6 +35,73 @@ impl LlmTaskExecutor {
         attempt < retry_count && retry_delay > 0
     }
 
+    fn extract_llm_input_params<'a>(
+        input: &'a serde_json::Value,
+        config: &'a LlmTemplate,
+    ) -> (&'a str, &'a str, &'a str, &'a str, &'a str) {
+        let system_prompt = input.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let user_prompt = input.get("user_prompt").and_then(|v| v.as_str()).unwrap_or(&config.user_prompt);
+        let api_key = input.get("_api_key").and_then(|v| v.as_str()).unwrap_or("");
+        let base_url = input.get("base_url").and_then(|v| v.as_str()).unwrap_or(&config.base_url);
+        let model = input.get("model").and_then(|v| v.as_str()).unwrap_or(&config.model);
+        (system_prompt, user_prompt, api_key, base_url, model)
+    }
+
+    async fn execute_llm_retry_loop(
+        client: &Client,
+        url: &str,
+        body: &serde_json::Value,
+        api_key: &str,
+        model: &str,
+        response_format: &Option<LlmResponseFormat>,
+        base_url: &str,
+        config: &LlmTemplate,
+        input_snapshot: serde_json::Value,
+    ) -> anyhow::Result<TaskExecutionResult> {
+        let attempts = config.retry_count + 1;
+        let mut last_error: Option<String> = None;
+
+        for attempt in 0..attempts {
+            let (status_code, resp_body) = match Self::send_llm_request(
+                client, url, body, api_key, config.timeout,
+            ).await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(e);
+                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
+                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
+                    }
+                    continue;
+                }
+            };
+
+            match Self::process_llm_response(
+                status_code, &resp_body, model, response_format,
+                attempt, attempts, config.retry_delay,
+            ).await {
+                Ok(Some(result)) => return Ok(TaskExecutionResult {
+                    input: Some(input_snapshot),
+                    ..result
+                }),
+                Err(e) => {
+                    last_error = Some(e);
+                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
+                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+        Ok(TaskExecutionResult {
+            status: NodeExecutionStatus::Failed,
+            input: Some(input_snapshot),
+            output: None,
+            error_message: Some(error_msg),
+        })
+    }
+
     async fn send_llm_request(
         client: &Client,
         url: &str,
@@ -238,24 +305,8 @@ impl TaskExecutor for LlmTaskExecutor {
             .cloned()
             .unwrap_or_else(|| json!({}));
 
-        let system_prompt = input
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let user_prompt = input
-            .get("user_prompt")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&config.user_prompt);
-        let api_key = input.get("_api_key").and_then(|v| v.as_str()).unwrap_or("");
-
-        let base_url = input
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&config.base_url);
-        let model = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&config.model);
+        let (system_prompt, user_prompt, api_key, base_url, model) =
+            Self::extract_llm_input_params(&input, config);
 
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
@@ -270,60 +321,12 @@ impl TaskExecutor for LlmTaskExecutor {
         let input_snapshot =
             Self::build_input_snapshot(base_url, model, system_prompt, user_prompt, config);
 
-        let mut last_error: Option<String> = None;
-        let attempts = config.retry_count + 1;
-
-        for attempt in 0..attempts {
-            let (status_code, resp_body) = match Self::send_llm_request(
-                &self.client, &url, &body, api_key, config.timeout,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    last_error = Some(e.clone());
-                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
-                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
-                    }
-                    continue;
-                }
-            };
-
-            match Self::process_llm_response(
-                status_code, &resp_body, model, &config.response_format,
-                attempt, attempts, config.retry_delay,
-            )
-            .await
-            {
-                Ok(Some(result)) => return Ok(TaskExecutionResult {
-                    input: Some(input_snapshot),
-                    ..result
-                }),
-                Err(e) => {
-                    last_error = Some(e);
-                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
-                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
-        error!(
-            task_instance_id = %task_instance.task_instance_id,
-            url = %url,
-            attempts = attempts,
-            error = %error_msg,
-            "LLM task failed after all retries"
-        );
-
-        Ok(TaskExecutionResult {
-            status: NodeExecutionStatus::Failed,
-            input: Some(input_snapshot),
-            output: None,
-            error_message: Some(error_msg),
-        })
+        Self::execute_llm_retry_loop(
+            &self.client, &url, &body, api_key, model,
+            &config.response_format, base_url, config,
+            input_snapshot,
+        )
+        .await
     }
 
     fn task_type(&self) -> TaskType {
@@ -477,5 +480,58 @@ mod tests {
             .unwrap();
         assert_eq!(output["attempt"], 2);
         assert!(output["usage"].is_null());
+    }
+
+    #[test]
+    fn should_sleep_true() {
+        assert!(LlmTaskExecutor::should_sleep_before_retry(0, 2, 5));
+    }
+
+    #[test]
+    fn should_sleep_false_at_limit() {
+        assert!(!LlmTaskExecutor::should_sleep_before_retry(2, 2, 5));
+    }
+
+    #[test]
+    fn should_sleep_false_zero_delay() {
+        assert!(!LlmTaskExecutor::should_sleep_before_retry(0, 2, 0));
+    }
+
+    #[tokio::test]
+    async fn process_llm_success() {
+        let result = LlmTaskExecutor::process_llm_response(
+            200, r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            "gpt-4", &None, 0, 1, 0,
+        ).await;
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(r.is_some());
+        assert_eq!(r.unwrap().status, NodeExecutionStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn process_llm_rate_limited() {
+        let result = LlmTaskExecutor::process_llm_response(
+            429, "rate limited", "gpt-4", &None, 0, 1, 0,
+        ).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_llm_client_error_fails() {
+        let result = LlmTaskExecutor::process_llm_response(
+            400, "bad request", "gpt-4", &None, 0, 1, 0,
+        ).await;
+        assert!(result.is_ok());
+        let r = result.unwrap().unwrap();
+        assert_eq!(r.status, NodeExecutionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn process_llm_invalid_json() {
+        let result = LlmTaskExecutor::process_llm_response(
+            200, "not json", "gpt-4", &None, 0, 1, 0,
+        ).await;
+        assert!(result.is_err());
     }
 }
