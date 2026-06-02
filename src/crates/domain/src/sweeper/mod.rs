@@ -74,47 +74,46 @@ impl Sweeper {
             Ok(z) => z,
             Err(e) => {
                 error!(error = %e, "sweeper: failed to scan zombie instances");
-                return;
+                Vec::new()
             }
         };
-
-        if zombies.is_empty() {
-            debug!("sweeper: no zombie instances found");
-            return;
-        }
 
         let mut recovered_running = 0u32;
         let mut recovered_await = 0u32;
         let mut skipped_cas = 0u32;
 
-        for instance in &zombies {
-            let id = &instance.workflow_instance_id;
-            let epoch = instance.epoch;
+        if zombies.is_empty() {
+            debug!("sweeper: no zombie instances found");
+        } else {
+            for instance in &zombies {
+                let id = &instance.workflow_instance_id;
+                let epoch = instance.epoch;
 
-            if let Err(_) = self.workflow_instance_svc.force_clear_lock(id, epoch).await {
-                debug!(workflow_instance_id = %id, epoch, "sweeper: CAS failed, skipping");
-                skipped_cas += 1;
-                continue;
-            }
+                if let Err(_) = self.workflow_instance_svc.force_clear_lock(id, epoch).await {
+                    debug!(workflow_instance_id = %id, epoch, "sweeper: CAS failed, skipping");
+                    skipped_cas += 1;
+                    continue;
+                }
 
-            match instance.status {
-                WorkflowInstanceStatus::Running => match self.recover_running(instance).await {
-                    Ok(_) => recovered_running += 1,
-                    Err(e) => warn!(
-                        workflow_instance_id = %id,
-                        error = %e,
-                        "sweeper: failed to recover running instance"
-                    ),
-                },
-                WorkflowInstanceStatus::Await => match self.recover_await(instance).await {
-                    Ok(_) => recovered_await += 1,
-                    Err(e) => warn!(
-                        workflow_instance_id = %id,
-                        error = %e,
-                        "sweeper: failed to recover await instance"
-                    ),
-                },
-                _ => {}
+                match instance.status {
+                    WorkflowInstanceStatus::Running => match self.recover_running(instance).await {
+                        Ok(_) => recovered_running += 1,
+                        Err(e) => warn!(
+                            workflow_instance_id = %id,
+                            error = %e,
+                            "sweeper: failed to recover running instance"
+                        ),
+                    },
+                    WorkflowInstanceStatus::Await => match self.recover_await(instance).await {
+                        Ok(_) => recovered_await += 1,
+                        Err(e) => warn!(
+                            workflow_instance_id = %id,
+                            error = %e,
+                            "sweeper: failed to recover await instance"
+                        ),
+                    },
+                    _ => {}
+                }
             }
         }
 

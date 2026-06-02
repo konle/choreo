@@ -60,9 +60,13 @@ coverage:
 crap:
 	cargo crap --workspace --lcov lcov.info --fail-above
 
-# Generate coverage + run CRAP gate in one step
-qc: coverage crap
+# Run CRAP report only (no gate, just for reference)
+crap-report:
+	cargo crap --workspace --lcov lcov.info --summary
 
 # Save a baseline (run on main branch only)
 crap-baseline:
 	cargo crap --workspace --lcov lcov.info --format json --output baseline.json
+
+# Generate coverage + run CRAP report in one step
+qc: coverage crap-report
