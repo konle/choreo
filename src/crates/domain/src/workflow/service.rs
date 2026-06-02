@@ -4,6 +4,45 @@ use crate::shared::job::{
 use crate::shared::workflow::{
     TaskInstanceStatus, TaskType, WorkflowInstanceStatus, WorkflowStatus,
 };
+
+struct NodeValidation {
+    idx: usize,
+    is_container: bool,
+}
+
+fn validate_node_for_retry_or_skip(
+    instance: &WorkflowInstanceEntity,
+    node_id: &str,
+    child_task_id: Option<&str>,
+    operation: &str,
+) -> Result<NodeValidation, String> {
+    if instance.get_current_node() != node_id {
+        return Err("node_id must match current_node".to_string());
+    }
+    let idx = instance.nodes.iter().position(|n| n.node_id == node_id)
+        .ok_or_else(|| format!("node not found: {}", node_id))?;
+    let node = &instance.nodes[idx];
+    if matches!(node.node_type, TaskType::SubWorkflow) {
+        return Err(format!(
+            "SubWorkflow nodes cannot be {} directly; {} the failed node inside the child workflow instance instead",
+            operation, operation
+        ));
+    }
+    let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
+    if is_container {
+        let cid = child_task_id.ok_or_else(|| {
+            format!("child_task_id is required when {operation} a Parallel/ForkJoin child task")
+        })?;
+        let prefix = format!("{}-{}-", instance.workflow_instance_id, node_id);
+        if !cid.starts_with(&prefix) {
+            return Err(format!(
+                "child_task_id '{}' does not belong to container node '{}'",
+                cid, node_id
+            ));
+        }
+    }
+    Ok(NodeValidation { idx, is_container })
+}
 use crate::task::entity::task_definition::TaskInstanceEntity;
 use crate::task::service::TaskInstanceService;
 use crate::workflow::entity::query::WorkflowInstanceQuery;
@@ -619,22 +658,11 @@ impl WorkflowInstanceService {
             return Err("node_id must match current_node".to_string());
         }
 
-        let idx = inst
-            .nodes
-            .iter()
-            .position(|n| n.node_id == node_id)
-            .ok_or_else(|| format!("node not found: {}", node_id))?;
-
+        let validated = validate_node_for_retry_or_skip(&inst, node_id, child_task_id.as_deref(), "skipped")?;
+        let idx = validated.idx;
         let node = &inst.nodes[idx];
-        let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
 
-        if matches!(node.node_type, TaskType::SubWorkflow) {
-            return Err(
-                "SubWorkflow nodes cannot be skipped directly; skip the failed node inside the child workflow instance instead".to_string(),
-            );
-        }
-
-        if is_container {
+        if validated.is_container {
             let cid = child_task_id.as_deref().ok_or_else(|| {
                 "child_task_id is required when skipping a Parallel/ForkJoin child task".to_string()
             })?;
@@ -750,33 +778,10 @@ impl WorkflowInstanceService {
             return Err("node_id must match current_node".to_string());
         }
 
-        let idx = inst
-            .nodes
-            .iter()
-            .position(|n| n.node_id == node_id)
-            .ok_or_else(|| format!("node not found: {}", node_id))?;
+        let validated = validate_node_for_retry_or_skip(&inst, node_id, child_task_id.as_deref(), "retried")?;
 
-        let node = &inst.nodes[idx];
-        let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
-
-        if matches!(node.node_type, TaskType::SubWorkflow) {
-            return Err(
-                "SubWorkflow nodes cannot be retried directly; retry the failed node inside the child workflow instance instead".to_string(),
-            );
-        }
-
-        if is_container {
-            let cid = child_task_id.as_deref().ok_or_else(|| {
-                "child_task_id is required when retrying a Parallel/ForkJoin child task".to_string()
-            })?;
-
-            let prefix = format!("{}-{}-", workflow_instance_id, node_id);
-            if !cid.starts_with(&prefix) {
-                return Err(format!(
-                    "child_task_id '{}' does not belong to container node '{}'",
-                    cid, node_id
-                ));
-            }
+        if validated.is_container {
+            let cid = child_task_id.as_deref().unwrap();
 
             if matches!(
                 inst.status,
@@ -814,6 +819,9 @@ impl WorkflowInstanceService {
         }
 
         // ── ordinary (atomic) node retry ──
+
+        let idx = validated.idx;
+        let node = &inst.nodes[idx];
 
         if !matches!(inst.status, WorkflowInstanceStatus::Failed) {
             return Err(format!(
