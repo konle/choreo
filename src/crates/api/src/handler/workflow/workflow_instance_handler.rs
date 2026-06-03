@@ -5,7 +5,9 @@ use axum::{
     routing::{get, post},
 };
 use domain::workflow::{
-    entity::workflow_definition::{NodeExecutionStatus, WorkflowInstanceEntity},
+    entity::workflow_definition::{
+        NodeExecutionStatus, WorkflowEntity, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+    },
     service::{WorkflowDefinitionService, WorkflowInstanceService, node_callback_child_task_id},
 };
 use domain::{
@@ -73,24 +75,31 @@ pub fn routes(handler: Arc<WorkflowInstanceHandler>) -> Router {
     Router::new().merge(reads).merge(writes).with_state(handler)
 }
 
-async fn create_instance(
-    State(handler): State<Arc<WorkflowInstanceHandler>>,
-    Extension(auth): Extension<AuthContext>,
-    Json(req): Json<CreateWorkflowInstanceRequest>,
-) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
+async fn load_workflow_entity_for_create(
+    handler: &WorkflowInstanceHandler,
+    auth: &AuthContext,
+    req: &CreateWorkflowInstanceRequest,
+) -> Result<WorkflowEntity, ApiError> {
     handler
         .definition_service
         .get_workflow_meta_entity_scoped(&auth.tenant_id, &req.workflow_meta_id)
         .await?;
-
     let workflow_entity = handler
         .definition_service
-        .get_workflow_entity(req.workflow_meta_id, req.version)
+        .get_workflow_entity(req.workflow_meta_id.clone(), req.version)
         .await?;
+    Ok(workflow_entity)
+}
 
+async fn validate_and_create_instance(
+    handler: &WorkflowInstanceHandler,
+    auth: &AuthContext,
+    req: CreateWorkflowInstanceRequest,
+    workflow_entity: WorkflowEntity,
+) -> Result<WorkflowInstanceEntity, ApiError> {
     match workflow_entity.status {
         WorkflowStatus::Draft => {
-            RequireDraftInstanceCreate::check(&auth)?;
+            RequireDraftInstanceCreate::check(auth)?;
         }
         WorkflowStatus::Published => {}
         _ => {
@@ -99,8 +108,7 @@ async fn create_instance(
             ));
         }
     }
-
-    let instance = handler
+    handler
         .instance_service
         .create_instance(
             &auth.tenant_id,
@@ -110,7 +118,17 @@ async fn create_instance(
             0,
             Some(auth.user_id.clone()),
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal)
+}
+
+async fn create_instance(
+    State(handler): State<Arc<WorkflowInstanceHandler>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateWorkflowInstanceRequest>,
+) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
+    let workflow_entity = load_workflow_entity_for_create(&handler, &auth, &req).await?;
+    let instance = validate_and_create_instance(&handler, &auth, req, workflow_entity).await?;
 
     info!(
         workflow_instance_id = %instance.workflow_instance_id,
@@ -200,6 +218,89 @@ async fn cancel_instance(
     Ok(Json(Response::success(result)))
 }
 
+async fn retry_container_child(
+    dispatcher: &Arc<dyn TaskDispatcher>,
+    updated: &WorkflowInstanceEntity,
+    auth: &AuthContext,
+    id: &str,
+    cid: &str,
+    node: &WorkflowNodeInstanceEntity,
+    req: &RetryWorkflowNodeRequest,
+) -> Result<(), ApiError> {
+    let item_index = cid.rsplit('-').next().and_then(|s| s.parse::<usize>().ok());
+    let caller_context = WorkflowCallerContext {
+        workflow_instance_id: updated.workflow_instance_id.clone(),
+        node_id: req.node_id.clone(),
+        parent_task_instance_id: Some(node.task_instance.id.clone()),
+        item_index,
+    };
+    dispatcher
+        .dispatch_task(ExecuteTaskJob {
+            task_instance_id: cid.to_string(),
+            tenant_id: auth.tenant_id.clone(),
+            caller_context: Some(caller_context),
+        })
+        .await
+        .map_err(|e| {
+            error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch child task retry");
+            ApiError::internal(e.to_string())
+        })?;
+    dispatcher
+        .dispatch_workflow(ExecuteWorkflowJob {
+            workflow_instance_id: updated.workflow_instance_id.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            event: WorkflowEvent::RetryContainerChild {
+                node_id: req.node_id.clone(),
+                child_task_id: cid.to_string(),
+            },
+        })
+        .await
+        .map_err(|e| {
+            error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch RetryContainerChild event");
+            ApiError::internal(e.to_string())
+        })?;
+    info!(workflow_instance_id = %id, node_id = %req.node_id, child_task_id = %cid, "retry-node: container child re-dispatched");
+    Ok(())
+}
+
+async fn retry_atomic_node(
+    dispatcher: &Arc<dyn TaskDispatcher>,
+    updated: &WorkflowInstanceEntity,
+    auth: &AuthContext,
+    id: &str,
+    req: &RetryWorkflowNodeRequest,
+) -> Result<(), ApiError> {
+    dispatcher
+        .dispatch_workflow(ExecuteWorkflowJob {
+            workflow_instance_id: updated.workflow_instance_id.clone(),
+            tenant_id: auth.tenant_id.clone(),
+            event: WorkflowEvent::Start,
+        })
+        .await
+        .map_err(|e| {
+            error!(workflow_instance_id = %id, error = %e, "failed to dispatch Start after retry");
+            ApiError::internal(e.to_string())
+        })?;
+    info!(workflow_instance_id = %id, node_id = %req.node_id, "retry-node: atomic node retried and Start dispatched");
+    Ok(())
+}
+
+async fn dispatch_retry(
+    dispatcher: &Arc<dyn TaskDispatcher>,
+    updated: &WorkflowInstanceEntity,
+    auth: &AuthContext,
+    id: &str,
+    node: &WorkflowNodeInstanceEntity,
+    req: &RetryWorkflowNodeRequest,
+) -> Result<(), ApiError> {
+    if matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin) {
+        let cid = req.child_task_id.as_ref().unwrap();
+        retry_container_child(dispatcher, updated, auth, id, cid, node, req).await
+    } else {
+        retry_atomic_node(dispatcher, updated, auth, id, req).await
+    }
+}
+
 async fn retry_node(
     State(handler): State<Arc<WorkflowInstanceHandler>>,
     Extension(auth): Extension<AuthContext>,
@@ -228,70 +329,7 @@ async fn retry_node(
         .find(|n| n.node_id == req.node_id)
         .ok_or_else(|| ApiError::internal("retried node missing after save"))?;
 
-    let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
-
-    if is_container {
-        // Container child retry is now event-based:
-        // The service already CAS-reset the child TaskInstance and the handler
-        // dispatches both the task execution and the RetryContainerChild event
-        // to the Workflow Worker (which safely rollbacks container state under lock).
-        let cid = req.child_task_id.as_ref().unwrap();
-        let item_index = cid.rsplit('-').next().and_then(|s| s.parse::<usize>().ok());
-
-        let caller_context = WorkflowCallerContext {
-            workflow_instance_id: updated.workflow_instance_id.clone(),
-            node_id: req.node_id.clone(),
-            parent_task_instance_id: Some(node.task_instance.id.clone()),
-            item_index,
-        };
-
-        handler
-            .dispatcher
-            .dispatch_task(ExecuteTaskJob {
-                task_instance_id: cid.clone(),
-                tenant_id: auth.tenant_id.clone(),
-                caller_context: Some(caller_context),
-            })
-            .await
-            .map_err(|e| {
-                error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch child task retry");
-                ApiError::internal(e.to_string())
-            })?;
-
-        handler
-            .dispatcher
-            .dispatch_workflow(ExecuteWorkflowJob {
-                workflow_instance_id: updated.workflow_instance_id.clone(),
-                tenant_id: auth.tenant_id.clone(),
-                event: WorkflowEvent::RetryContainerChild {
-                    node_id: req.node_id.clone(),
-                    child_task_id: cid.clone(),
-                },
-            })
-            .await
-            .map_err(|e| {
-                error!(workflow_instance_id = %id, child_task_id = %cid, error = %e, "failed to dispatch RetryContainerChild event");
-                ApiError::internal(e.to_string())
-            })?;
-
-        info!(workflow_instance_id = %id, node_id = %req.node_id, child_task_id = %cid, "retry-node: container child re-dispatched");
-    } else {
-        handler
-            .dispatcher
-            .dispatch_workflow(ExecuteWorkflowJob {
-                workflow_instance_id: updated.workflow_instance_id.clone(),
-                tenant_id: auth.tenant_id.clone(),
-                event: WorkflowEvent::Start,
-            })
-            .await
-            .map_err(|e| {
-                error!(workflow_instance_id = %id, error = %e, "failed to dispatch Start after retry");
-                ApiError::internal(e.to_string())
-            })?;
-
-        info!(workflow_instance_id = %id, node_id = %req.node_id, "retry-node: atomic node retried and Start dispatched");
-    }
-
+    dispatch_retry(&handler.dispatcher, &updated, &auth, &id, node, &req).await?;
     Ok(Json(Response::success(updated)))
 }
 
@@ -307,6 +345,19 @@ async fn resume_instance(
     let result = handler.instance_service.resume_instance(&id).await?;
     info!(workflow_instance_id = %id, "workflow instance resumed");
     Ok(Json(Response::success(result)))
+}
+
+fn prepare_skip_dispatch_params<'a>(
+    updated: &'a WorkflowInstanceEntity,
+    node: &'a WorkflowNodeInstanceEntity,
+    req: &'a SkipWorkflowNodeRequest,
+) -> (String, serde_json::Value) {
+    let child_task_id = match req.child_task_id {
+        Some(ref cid) => cid.clone(),
+        None => node_callback_child_task_id(updated, node),
+    };
+    let out = node.task_instance.output.clone().unwrap_or(req.output.clone());
+    (child_task_id, out)
 }
 
 async fn skip_node(
@@ -338,13 +389,7 @@ async fn skip_node(
         .find(|n| n.node_id == req.node_id)
         .ok_or_else(|| ApiError::internal("skipped node missing after save"))?;
 
-    let child_task_id = if let Some(ref cid) = req.child_task_id {
-        cid.clone()
-    } else {
-        node_callback_child_task_id(&updated, node)
-    };
-
-    let out = node.task_instance.output.clone().unwrap_or(req.output);
+    let (child_task_id, out) = prepare_skip_dispatch_params(&updated, node, &req);
 
     handler
         .dispatcher
@@ -371,39 +416,38 @@ async fn skip_node(
     Ok(Json(Response::success(updated)))
 }
 
-async fn resume_node(
-    State(handler): State<Arc<WorkflowInstanceHandler>>,
-    Extension(auth): Extension<AuthContext>,
-    Path(id): Path<String>,
-    Json(req): Json<ResumeNodeRequest>,
-) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
-    use domain::task::entity::task_definition::{PauseMode, TaskTemplate};
-
-    let instance = handler
-        .instance_service
-        .get_workflow_instance_scoped(&auth.tenant_id, &id)
-        .await?;
-
+fn find_resume_node<'a>(
+    instance: &'a WorkflowInstanceEntity,
+    node_id: &str,
+) -> Result<&'a WorkflowNodeInstanceEntity, ApiError> {
     let node = instance
         .nodes
         .iter()
-        .find(|n| n.node_id == req.node_id)
-        .ok_or_else(|| ApiError::bad_request(format!("Node not found: {}", req.node_id)))?;
+        .find(|n| n.node_id == node_id)
+        .ok_or_else(|| ApiError::bad_request(format!("Node not found: {}", node_id)))?;
 
     if node.status != NodeExecutionStatus::Suspended {
         return Err(ApiError::bad_request(format!(
             "Node {} is not suspended (current: {:?})",
-            req.node_id, node.status
+            node_id, node.status
         )));
     }
+    Ok(node)
+}
 
-    let is_manual_pause = matches!(&node.task_instance.task_template, TaskTemplate::Pause(t) if t.mode == PauseMode::Manual);
+fn validate_manual_pause(node: &WorkflowNodeInstanceEntity) -> Result<(), ApiError> {
+    use domain::task::entity::task_definition::{PauseMode, TaskTemplate};
+    let is_manual_pause =
+        matches!(&node.task_instance.task_template, TaskTemplate::Pause(t) if t.mode == PauseMode::Manual);
     if !is_manual_pause {
         return Err(ApiError::bad_request(
             "resume-node only applies to Manual Pause nodes",
         ));
     }
+    Ok(())
+}
 
+fn validate_resume_timer(node: &WorkflowNodeInstanceEntity) -> Result<(), ApiError> {
     let resume_at = node
         .task_instance
         .output
@@ -419,19 +463,46 @@ async fn resume_node(
             resume_at.to_rfc3339()
         )));
     }
+    Ok(())
+}
 
+async fn fetch_and_validate_resume(
+    handler: &WorkflowInstanceHandler,
+    tenant_id: &str,
+    id: &str,
+    node_id: &str,
+) -> Result<(WorkflowInstanceEntity, String, Option<serde_json::Value>), ApiError> {
+    let instance = handler
+        .instance_service
+        .get_workflow_instance_scoped(tenant_id, id)
+        .await?;
+    let node = find_resume_node(&instance, node_id)?;
+    validate_manual_pause(node)?;
+    validate_resume_timer(node)?;
     let child_task_id = node_callback_child_task_id(&instance, node);
+    let output = node.task_instance.output.clone();
+    Ok((instance, child_task_id, output))
+}
+
+async fn resume_node(
+    State(handler): State<Arc<WorkflowInstanceHandler>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+    Json(req): Json<ResumeNodeRequest>,
+) -> Result<Json<Response<WorkflowInstanceEntity>>, ApiError> {
+    let (instance, child_task_id, output) =
+        fetch_and_validate_resume(&handler, &auth.tenant_id, &id, &req.node_id).await?;
 
     handler
         .dispatcher
         .dispatch_workflow(ExecuteWorkflowJob {
-            workflow_instance_id: instance.workflow_instance_id.clone(),
+            workflow_instance_id: instance.workflow_instance_id,
             tenant_id: auth.tenant_id.clone(),
             event: WorkflowEvent::NodeCallback {
-                node_id: req.node_id.clone(),
+                node_id: req.node_id,
                 child_task_id,
                 status: NodeExecutionStatus::Success,
-                output: node.task_instance.output.clone(),
+                output,
                 error_message: None,
                 input: None,
             },
@@ -442,7 +513,7 @@ async fn resume_node(
             ApiError::internal(e.to_string())
         })?;
 
-    info!(workflow_instance_id = %id, node_id = %req.node_id, "resume-node: manual pause confirmed");
+    info!(workflow_instance_id = %id, "resume-node: manual pause confirmed");
 
     let updated = handler
         .instance_service

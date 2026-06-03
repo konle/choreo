@@ -5,7 +5,7 @@ use domain::approval::service::ApprovalService;
 use domain::notification::dispatcher::NotificationDispatcher;
 use domain::notification::service::NotificationService;
 use domain::plugin::manager::PluginManager;
-use domain::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowEvent};
+use domain::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob};
 use domain::sweeper::{Sweeper, SweeperConfig};
 use domain::task::service::TaskInstanceService;
 use domain::variable::service::VariableService;
@@ -100,7 +100,7 @@ async fn fail_and_dispatch(
         warn!(task_instance_id = %job.task_instance_id, error = %e, "CAS fail_with_error failed");
     }
     let failed = domain::shared::workflow::TaskInstanceStatus::Failed;
-    dispatch_outbound(&manager, &job, old_status, &failed, None, Some(error), None).await
+    dispatch_outbound(manager, job, old_status, &failed, None, Some(error), None).await
 }
 
 async fn dispatch_outbound(
@@ -188,40 +188,85 @@ async fn handle_task_job(
 
     let old_task_status = domain::shared::workflow::TaskInstanceStatus::Running;
 
-    let exec_result = execute_or_fail(task_manager, task_svc, &manager, &job, &task_instance_entity, start, &old_task_status).await
+    let exec_result = execute_or_fail(task_manager, task_svc, manager, &job, &task_instance_entity, start, &old_task_status).await
         .map_err(|_| std::io::Error::other("task execution failed"))?;
     let execution_duration = start.elapsed().as_millis() as u64;
 
     info!(task_instance_id = %job.task_instance_id, status = ?exec_result.status, "task completed");
 
-    complete_or_fail_and_dispatch(task_svc, &manager, &job, &exec_result, execution_duration, &old_task_status).await?;
+    complete_or_fail_and_dispatch(task_svc, manager, &job, &exec_result, execution_duration, &old_task_status).await?;
 
     Ok(())
+}
+
+async fn notify_user_ids(
+    user_ids: &[String],
+    service: &NotificationService,
+    event: &domain::notification::entity::NotificationEvent,
+) {
+    for uid in user_ids {
+        if let Err(e) = service
+            .create_in_app_record(
+                &event.tenant_id,
+                uid,
+                &event.event_type,
+                &event.payload,
+                "force_push",
+                "",
+                event.workflow_meta_id.as_deref(),
+            )
+            .await
+        {
+            warn!(notification_error = %e, "failed to create forced notification record");
+        }
+    }
+}
+
+async fn notify_channel(
+    service: &NotificationService,
+    event: &domain::notification::entity::NotificationEvent,
+    user_id: &str,
+    chan: &domain::notification::entity::NotificationChannel,
+) {
+    match chan {
+        domain::notification::entity::NotificationChannel::InApp => {
+            if let Err(e) = service
+                .create_in_app_record(
+                    &event.tenant_id,
+                    user_id,
+                    &event.event_type,
+                    &event.payload,
+                    "subscription",
+                    "",
+                    event.workflow_meta_id.as_deref(),
+                )
+                .await
+            {
+                warn!(notification_error = %e, "failed to create in-app notification record");
+            }
+        }
+        domain::notification::entity::NotificationChannel::Webhook { .. } => {}
+    }
+}
+
+async fn notify_subscribed_recipients(
+    recipients: &[(String, Vec<domain::notification::entity::NotificationChannel>)],
+    service: &NotificationService,
+    event: &domain::notification::entity::NotificationEvent,
+) {
+    for (user_id, channels) in recipients {
+        for chan in channels {
+            notify_channel(service, event, user_id, chan).await;
+        }
+    }
 }
 
 async fn handle_notification_event(
     event: domain::notification::entity::NotificationEvent,
     service: Data<Arc<NotificationService>>,
 ) -> Result<(), std::io::Error> {
-    use domain::notification::entity::NotificationChannel;
-
     if let Some(ref user_ids) = event.target_user_ids {
-        for uid in user_ids {
-            if let Err(e) = service
-                .create_in_app_record(
-                    &event.tenant_id,
-                    uid,
-                    &event.event_type,
-                    &event.payload,
-                    "force_push",
-                    "",
-                    event.workflow_meta_id.as_deref(),
-                )
-                .await
-            {
-                warn!(notification_error = %e, "failed to create forced notification record");
-            }
-        }
+        notify_user_ids(user_ids, &service, &event).await;
     } else {
         let recipients = match service
             .find_recipients_for_event(
@@ -238,36 +283,13 @@ async fn handle_notification_event(
             }
         };
 
-        for (user_id, channels) in &recipients {
-            for chan in channels {
-                match chan {
-                    NotificationChannel::InApp => {
-                        if let Err(e) = service
-                            .create_in_app_record(
-                                &event.tenant_id,
-                                user_id,
-                                &event.event_type,
-                                &event.payload,
-                                "subscription",
-                                "",
-                                event.workflow_meta_id.as_deref(),
-                            )
-                            .await
-                        {
-                            warn!(notification_error = %e, "failed to create in-app notification record");
-                        }
-                    }
-                    NotificationChannel::Webhook { .. } => {
-                        // V1: Webhook delivery not yet implemented
-                    }
-                }
-            }
-        }
+        notify_subscribed_recipients(&recipients, &service, &event).await;
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_plugin_manager(
     workflow_definition_svc: WorkflowDefinitionService,
     workflow_instance_svc: Arc<WorkflowInstanceService>,

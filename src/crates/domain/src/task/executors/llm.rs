@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
-use tracing::{debug, error, warn};
+use tracing::error;
 
 use crate::shared::workflow::TaskType;
 use crate::task::entity::task_definition::{LlmResponseFormat, LlmTemplate, TaskInstanceEntity, TaskTemplate};
@@ -12,11 +12,31 @@ pub struct LlmTaskExecutor {
     client: Client,
 }
 
+struct LlmRequestContext<'a> {
+    client: &'a Client,
+    url: &'a str,
+    body: &'a serde_json::Value,
+    api_key: &'a str,
+    model: &'a str,
+    response_format: &'a Option<LlmResponseFormat>,
+    config: &'a LlmTemplate,
+}
+
+enum LlmAttemptOutcome {
+    Success(TaskExecutionResult),
+    Error(String),
+    NoResult,
+}
+
+impl Default for LlmTaskExecutor {
+    fn default() -> Self {
+        Self { client: Client::new() }
+    }
+}
+
 impl LlmTaskExecutor {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        Self::default()
     }
 
     fn is_success_status(status_code: u16) -> bool {
@@ -47,49 +67,82 @@ impl LlmTaskExecutor {
         (system_prompt, user_prompt, api_key, base_url, model)
     }
 
+    async fn maybe_sleep_before_retry(attempt: u32, retry_count: u32, retry_delay: u32) {
+        if LlmTaskExecutor::should_sleep_before_retry(attempt, retry_count, retry_delay) {
+            tokio::time::sleep(std::time::Duration::from_secs(retry_delay as u64)).await;
+        }
+    }
+
+    async fn send_llm_request_or_retry(
+        ctx: &LlmRequestContext<'_>,
+        attempt: u32,
+    ) -> Result<(u16, String), LlmAttemptOutcome> {
+        match LlmTaskExecutor::send_llm_request(ctx.client, ctx.url, ctx.body, ctx.api_key, ctx.config.timeout).await {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                LlmTaskExecutor::maybe_sleep_before_retry(attempt, ctx.config.retry_count, ctx.config.retry_delay).await;
+                Err(LlmAttemptOutcome::Error(e))
+            }
+        }
+    }
+
+    async fn process_llm_result_to_outcome(
+        result: Result<Option<TaskExecutionResult>, String>,
+        input_snapshot: &serde_json::Value,
+        attempt: u32,
+        retry_count: u32,
+        retry_delay: u32,
+    ) -> LlmAttemptOutcome {
+        match result {
+            Ok(Some(mut r)) => {
+                r.input = Some(input_snapshot.clone());
+                LlmAttemptOutcome::Success(r)
+            }
+            Err(e) => {
+                LlmTaskExecutor::maybe_sleep_before_retry(attempt, retry_count, retry_delay).await;
+                LlmAttemptOutcome::Error(e)
+            }
+            _ => LlmAttemptOutcome::NoResult,
+        }
+    }
+
+    async fn execute_single_llm_attempt(
+        ctx: &LlmRequestContext<'_>,
+        attempt: u32,
+        attempts: u32,
+        input_snapshot: &serde_json::Value,
+    ) -> LlmAttemptOutcome {
+        let result = LlmTaskExecutor::send_llm_request_or_retry(ctx, attempt).await;
+        let (status_code, resp_body) = match result {
+            Ok(r) => r,
+            Err(outcome) => return outcome,
+        };
+
+        let process_result = LlmTaskExecutor::process_llm_response(
+            status_code, &resp_body, ctx.model, ctx.response_format,
+            attempt, attempts, ctx.config.retry_delay,
+        ).await;
+
+        LlmTaskExecutor::process_llm_result_to_outcome(
+            process_result, input_snapshot, attempt,
+            ctx.config.retry_count, ctx.config.retry_delay,
+        ).await
+    }
+
     async fn execute_llm_retry_loop(
-        client: &Client,
-        url: &str,
-        body: &serde_json::Value,
-        api_key: &str,
-        model: &str,
-        response_format: &Option<LlmResponseFormat>,
-        base_url: &str,
-        config: &LlmTemplate,
+        ctx: LlmRequestContext<'_>,
         input_snapshot: serde_json::Value,
     ) -> anyhow::Result<TaskExecutionResult> {
-        let attempts = config.retry_count + 1;
+        let attempts = ctx.config.retry_count + 1;
         let mut last_error: Option<String> = None;
 
         for attempt in 0..attempts {
-            let (status_code, resp_body) = match Self::send_llm_request(
-                client, url, body, api_key, config.timeout,
+            match LlmTaskExecutor::execute_single_llm_attempt(
+                &ctx, attempt, attempts, &input_snapshot,
             ).await {
-                Ok(r) => r,
-                Err(e) => {
-                    last_error = Some(e);
-                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
-                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
-                    }
-                    continue;
-                }
-            };
-
-            match Self::process_llm_response(
-                status_code, &resp_body, model, response_format,
-                attempt, attempts, config.retry_delay,
-            ).await {
-                Ok(Some(result)) => return Ok(TaskExecutionResult {
-                    input: Some(input_snapshot),
-                    ..result
-                }),
-                Err(e) => {
-                    last_error = Some(e);
-                    if Self::should_sleep_before_retry(attempt, config.retry_count, config.retry_delay) {
-                        tokio::time::sleep(std::time::Duration::from_secs(config.retry_delay as u64)).await;
-                    }
-                }
-                _ => {}
+                LlmAttemptOutcome::Success(result) => return Ok(result),
+                LlmAttemptOutcome::Error(e) => last_error = Some(e),
+                LlmAttemptOutcome::NoResult => {}
             }
         }
 
@@ -321,12 +374,16 @@ impl TaskExecutor for LlmTaskExecutor {
         let input_snapshot =
             Self::build_input_snapshot(base_url, model, system_prompt, user_prompt, config);
 
-        Self::execute_llm_retry_loop(
-            &self.client, &url, &body, api_key, model,
-            &config.response_format, base_url, config,
-            input_snapshot,
-        )
-        .await
+        let ctx = LlmRequestContext {
+            client: &self.client,
+            url: &url,
+            body: &body,
+            api_key,
+            model,
+            response_format: &config.response_format,
+            config,
+        };
+        Self::execute_llm_retry_loop(ctx, input_snapshot).await
     }
 
     fn task_type(&self) -> TaskType {

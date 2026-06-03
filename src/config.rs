@@ -103,10 +103,10 @@ pub fn apply_env_overrides(
     if let Some(v) = lookup("REDIS_URL") {
         config.database.redis_url = v;
     }
-    if let Some(v) = lookup("API_PORT") {
-        if let Ok(port) = v.parse() {
-            config.server.port = port;
-        }
+    if let Some(v) = lookup("API_PORT")
+        && let Ok(port) = v.parse()
+    {
+        config.server.port = port;
     }
     if let Some(v) = lookup("VARIABLE_ENCRYPT_KEY") {
         config.security.variable_encrypt_key = v;
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn apply_env_overrides_modifies_config() {
         let mut config = default_config();
-        let overrides = vec![
+        let overrides = [
             ("MONGO_URL", "mongodb://prod"),
             ("REDIS_URL", "redis://prod"),
             ("API_PORT", "8080"),

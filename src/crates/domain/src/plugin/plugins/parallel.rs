@@ -12,11 +12,12 @@ use crate::workflow::entity::workflow_definition::{
     NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 
+#[derive(Default)]
 pub struct ParallelPlugin {}
 
 impl ParallelPlugin {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
     fn resolve_items(
@@ -85,7 +86,7 @@ impl ParallelPlugin {
         node_instance: &WorkflowNodeInstanceEntity,
         workflow_instance: &WorkflowInstanceEntity,
     ) -> anyhow::Result<ContainerGatherResult> {
-        let mut result = ContainerGatherResult::new();
+        let mut result = ContainerGatherResult::default();
 
         for index in 0..total_items {
             let child_task_id = format!(

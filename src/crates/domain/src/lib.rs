@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 pub mod apikey;
 pub mod approval;
 pub mod notification;

@@ -19,6 +19,7 @@ use axum::{Router, middleware};
 use domain::user::entity::Permission;
 use std::sync::Arc;
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_router(
     auth_handler: Arc<AuthHandler>,
     tenant_handler: Arc<TenantHandler>,

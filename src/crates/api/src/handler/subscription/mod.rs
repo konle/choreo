@@ -58,7 +58,7 @@ async fn list_subscriptions(
         .service
         .list_subscriptions(&auth.tenant_id, &auth.user_id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(subs)))
 }
 
@@ -84,7 +84,7 @@ async fn create_subscription(
             req.channels,
         )
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(sub)))
 }
 
@@ -97,7 +97,7 @@ async fn get_subscription(
         .service
         .get_subscription(&auth.tenant_id, &id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(sub)))
 }
 
@@ -111,7 +111,7 @@ async fn update_subscription(
         .service
         .get_subscription(&auth.tenant_id, &id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     if sub.user_id != auth.user_id {
         return Err(ApiError::forbidden("cannot modify another user's subscription"));
     }
@@ -124,7 +124,7 @@ async fn update_subscription(
         .service
         .update_subscription(sub)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(updated)))
 }
 
@@ -137,6 +137,6 @@ async fn delete_subscription(
         .service
         .delete_subscription(&auth.tenant_id, &id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(())))
 }

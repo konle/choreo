@@ -7,11 +7,12 @@ use crate::workflow::entity::workflow_definition::{
     WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 
+#[derive(Default)]
 pub struct LlmPlugin {}
 
 impl LlmPlugin {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 }
 

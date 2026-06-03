@@ -4,8 +4,6 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
-use rand::prelude::*;
-use rand::{Rng, rngs::ThreadRng};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -27,7 +25,7 @@ async fn main() {
 
     info!(config = %cli.config, "testserver starting");
 
-    let addr = format!("0.0.0.0:8081");
+    let addr = "0.0.0.0:8081".to_string();
     let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
         error!(addr = %addr, error = %e, "failed to bind");
         std::process::exit(1);
@@ -55,6 +53,7 @@ async fn root() -> Json<Response<String>> {
 struct CreateUserRequest {
     name: String,
     email: String,
+    #[allow(dead_code)]
     password: String,
 }
 

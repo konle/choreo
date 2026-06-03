@@ -44,8 +44,10 @@ impl TaskInstanceRepositoryImpl {
         }
         Ok(())
     }
-    fn normalize_sort_order(sort_order: &str) -> i32 {
-        if sort_order == "asc" { 1 } else { -1 }
+
+    fn build_sort_doc(sort_by: &str, sort_order: &str) -> Document {
+        let order: i32 = if sort_order == "asc" { 1 } else { -1 };
+        doc! { sort_by: order }
     }
 
     fn build_filter(&self, query: &TaskInstanceQuery) -> Document {
@@ -53,10 +55,10 @@ impl TaskInstanceRepositoryImpl {
         if let Some(task_id) = &query.filter.task_id {
             filter.insert("task_id", task_id);
         }
-        if let Some(status) = &query.filter.status {
-            if let Ok(bson_val) = mongodb::bson::to_bson(status) {
-                filter.insert("task_status", bson_val);
-            }
+        if let Some(status) = &query.filter.status
+            && let Ok(bson_val) = mongodb::bson::to_bson(status)
+        {
+            filter.insert("task_status", bson_val);
         }
         filter
     }
@@ -69,6 +71,91 @@ impl TaskInstanceRepositoryImpl {
             database,
             collection,
         }
+    }
+
+    fn serialize_bson_field(
+        value: &serde_json::Value,
+        field_name: &str,
+    ) -> std::result::Result<mongodb::bson::Bson, String> {
+        mongodb::bson::to_bson(value).map_err(|e| format!("serialize {field_name}: {e}"))
+    }
+
+    fn insert_serialized_field(
+        doc: &mut Document,
+        key: &str,
+        value: Option<&serde_json::Value>,
+    ) -> std::result::Result<(), String> {
+        if let Some(v) = value {
+            doc.insert(key, Self::serialize_bson_field(v, key)?);
+        }
+        Ok(())
+    }
+
+    fn insert_str_field(doc: &mut Document, key: &str, value: Option<&String>) {
+        if let Some(ref v) = value {
+            doc.insert(key, v);
+        }
+    }
+
+    fn insert_i64_field(doc: &mut Document, key: &str, value: Option<i64>) {
+        if let Some(v) = value {
+            doc.insert(key, v);
+        }
+    }
+
+    fn build_transfer_set_fields(
+        fields: TaskTransitionFields,
+        to_bson: &mongodb::bson::Bson,
+    ) -> std::result::Result<Document, String> {
+        let mut set_fields = doc! {
+            "task_status": to_bson,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        };
+        Self::insert_serialized_field(&mut set_fields, "output", fields.output.as_ref())?;
+        Self::insert_serialized_field(&mut set_fields, "input", fields.input.as_ref())?;
+        Self::insert_str_field(&mut set_fields, "error_message", fields.error_message.as_ref());
+        Self::insert_i64_field(&mut set_fields, "execution_duration", fields.execution_duration.map(|d| d as i64));
+        Ok(set_fields)
+    }
+
+    async fn paginated_task_query(
+        &self,
+        filter: Document,
+        page: u64,
+        page_size: u64,
+        sort_doc: Document,
+    ) -> Result<PaginatedData<TaskInstanceEntity>, RepositoryError> {
+        let skip = (page - 1) * page_size;
+        let total = self.collection.count_documents(filter.clone()).await?;
+        let find_options = FindOptions::builder()
+            .skip(skip)
+            .limit(page_size as i64)
+            .sort(sort_doc)
+            .build();
+        let cursor = self.collection.find(filter).with_options(find_options).await?;
+        let items: Vec<TaskInstanceEntity> = cursor.try_collect().await?;
+        Ok(PaginatedData { items, total, page, page_size })
+    }
+
+    async fn execute_cas_update(
+        &self,
+        task_instance_id: &str,
+        from_status: &TaskInstanceStatus,
+        filter: Document,
+        update: Document,
+    ) -> Result<TaskInstanceEntity, RepositoryError> {
+        let result = self
+            .collection
+            .find_one_and_update(filter, update)
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "CAS failed: task instance {} not in expected state {:?}",
+                    task_instance_id, from_status
+                )
+            })?;
+        Ok(result)
     }
 }
 
@@ -114,39 +201,9 @@ impl TaskInstanceEntityRepository for TaskInstanceRepositoryImpl {
         let filter = self.build_filter(query);
         let page = query.pagination.page;
         let page_size = query.pagination.page_size;
-        let skip = (page - 1) * page_size;
         Self::validate_sort_field(&query.sort.sort_by)?;
-        let sort_order: i32 = if query.sort.sort_order == "asc" {
-            1
-        } else {
-            -1
-        };
-        let sort_doc = doc! { &query.sort.sort_by: sort_order };
-        // let find_options = FindOptions::builder()
-        //     .skip(skip as u64)
-        //     .limit(page_size as i64)
-        //     .sort(sort_doc)
-        //     .build();
-        let total = self.collection.count_documents(filter.clone()).await?;
-
-        let find_options = FindOptions::builder()
-            .skip(skip as u64)
-            .limit(page_size as i64)
-            .sort(sort_doc)
-            .build();
-        let cursor = self
-            .collection
-            .find(filter)
-            .with_options(find_options)
-            .await?;
-        let items: Vec<TaskInstanceEntity> = cursor.try_collect().await?;
-
-        Ok(PaginatedData {
-            items,
-            total,
-            page,
-            page_size,
-        })
+        let sort_doc = Self::build_sort_doc(&query.sort.sort_by, &query.sort.sort_order);
+        self.paginated_task_query(filter, page, page_size, sort_doc).await
     }
 
     async fn update_task_instance_entity(
@@ -167,52 +224,23 @@ impl TaskInstanceEntityRepository for TaskInstanceRepositoryImpl {
         to_status: &TaskInstanceStatus,
         fields: TaskTransitionFields,
     ) -> Result<TaskInstanceEntity, RepositoryError> {
-        let from_bson = mongodb::bson::to_bson(from_status)
-            .map_err(|e| format!("serialize from_status: {e}"))?;
-        let to_bson =
-            mongodb::bson::to_bson(to_status).map_err(|e| format!("serialize to_status: {e}"))?;
+        let from_bson = Self::serialize_bson_field(
+            &serde_json::to_value(from_status).unwrap_or_default(),
+            "from_status",
+        )?;
+        let to_bson = Self::serialize_bson_field(
+            &serde_json::to_value(to_status).unwrap_or_default(),
+            "to_status",
+        )?;
 
         let filter = doc! {
             "task_instance_id": task_instance_id,
             "task_status": from_bson,
         };
-        let mut set_fields = doc! {
-            "task_status": to_bson,
-            "updated_at": chrono::Utc::now().to_rfc3339(),
-        };
-        if let Some(ref out) = fields.output {
-            set_fields.insert(
-                "output",
-                mongodb::bson::to_bson(out).map_err(|e| format!("serialize output: {e}"))?,
-            );
-        }
-        if let Some(ref inp) = fields.input {
-            set_fields.insert(
-                "input",
-                mongodb::bson::to_bson(inp).map_err(|e| format!("serialize input: {e}"))?,
-            );
-        }
-        if let Some(ref err) = fields.error_message {
-            set_fields.insert("error_message", err);
-        }
-        if let Some(execution_duration) = fields.execution_duration {
-            set_fields.insert("execution_duration", execution_duration as i64);
-        }
+        let set_fields = Self::build_transfer_set_fields(fields, &to_bson)?;
         let update = doc! { "$set": set_fields };
 
-        let result = self
-            .collection
-            .find_one_and_update(filter, update)
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await?
-            .ok_or_else(|| {
-                format!(
-                    "CAS failed: task instance {} not in expected state {:?}",
-                    task_instance_id, from_status
-                )
-            })?;
-
-        Ok(result)
+        self.execute_cas_update(task_instance_id, from_status, filter, update).await
     }
 }
 

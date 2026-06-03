@@ -96,7 +96,7 @@ async fn assign_role(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<Json<Response<UserTenantRole>>, ApiError> {
-    let role = TenantRole::from_str(&req.role)
+    let role = TenantRole::parse(&req.role)
         .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {}", req.role)))?;
 
     let user_id = resolve_username(&handler, &req.username).await?;
@@ -114,7 +114,7 @@ async fn update_role(
     Path(username): Path<String>,
     Json(req): Json<AssignRoleRequest>,
 ) -> Result<Json<Response<UserTenantRole>>, ApiError> {
-    let role = TenantRole::from_str(&req.role)
+    let role = TenantRole::parse(&req.role)
         .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {}", req.role)))?;
 
     let user_id = resolve_username(&handler, &username).await?;
@@ -156,7 +156,7 @@ async fn create_user(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<Response<CreateUserResponse>>, ApiError> {
-    let role = TenantRole::from_str(&req.role)
+    let role = TenantRole::parse(&req.role)
         .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {}", req.role)))?;
 
     let initial_password = generate_initial_password();

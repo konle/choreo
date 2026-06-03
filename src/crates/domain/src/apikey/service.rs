@@ -28,10 +28,8 @@ pub fn validate_key_entity(
     if entity.status != ApiKeyStatus::Active {
         return Err("api key is not active");
     }
-    if let Some(exp) = entity.expires_at {
-        if exp < now {
-            return Err("api key has expired");
-        }
+    if let Some(exp) = entity.expires_at && exp < now {
+        return Err("api key has expired");
     }
     Ok(())
 }
@@ -158,7 +156,7 @@ impl ApiKeyService {
         }
         let entity = self.repository.get_by_prefix(&prefix).await?;
         validate_key_entity(full_key, &entity, Utc::now())
-            .map_err(|msg| RepositoryError::from(msg))?;
+            .map_err(RepositoryError::from)?;
         let mut updated = entity;
         updated.last_used_at = Some(Utc::now());
         updated.updated_at = Utc::now();

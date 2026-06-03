@@ -70,10 +70,8 @@ impl PluginManager {
         job: &ExecuteTaskJob,
         parent_node_ctx: &serde_json::Value,
     ) -> Option<serde_json::Value> {
-        if let TaskTemplate::Llm(_) = &parent.task_template {
-            if parent.input.is_some() {
-                return parent.input.clone();
-            }
+        if matches!(&parent.task_template, TaskTemplate::Llm(_)) && parent.input.is_some() {
+            return parent.input.clone();
         }
 
         let ctx = match &parent.task_template {
@@ -141,6 +139,90 @@ impl PluginManager {
         }
     }
 
+    async fn try_update_existing(
+        task_svc: &std::sync::Arc<crate::task::service::TaskInstanceService>,
+        job: &ExecuteTaskJob,
+        child_template: &TaskTemplate,
+        child_task_type: &crate::shared::workflow::TaskType,
+        effective_task_id: &str,
+    ) -> anyhow::Result<bool> {
+        let Ok(existing) = task_svc
+            .get_task_instance_entity(job.task_instance_id.clone())
+            .await
+        else {
+            return Ok(false);
+        };
+
+        if existing.task_status.is_terminal() {
+            warn!(
+                task_instance_id = %job.task_instance_id,
+                status = ?existing.task_status,
+                "task instance in terminal state, refusing to overwrite"
+            );
+            return Ok(true);
+        }
+        if existing.task_type != *child_task_type {
+            warn!(
+                task_instance_id = %job.task_instance_id,
+                existing_type = ?existing.task_type,
+                expected_type = ?child_task_type,
+                "task instance has wrong task_type, correcting"
+            );
+            let mut corrected = existing;
+            corrected.task_type = child_task_type.clone();
+            corrected.task_template = child_template.clone();
+            corrected.task_id = effective_task_id.to_string();
+            task_svc
+                .update_task_instance_entity(corrected)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Ok(true)
+    }
+
+    fn build_new_task_instance(
+        parent: &TaskInstanceEntity,
+        child_template: TaskTemplate,
+        child_task_type: crate::shared::workflow::TaskType,
+        effective_task_id: String,
+        job: &ExecuteTaskJob,
+    ) -> TaskInstanceEntity {
+        let now = chrono::Utc::now();
+        let mut task_instance: TaskInstanceEntity = parent.clone();
+        task_instance.task_template = child_template;
+        task_instance.task_type = child_task_type;
+        task_instance.id = job.task_instance_id.clone();
+        task_instance.task_id = effective_task_id;
+        task_instance.task_instance_id = job.task_instance_id.clone();
+        task_instance.tenant_id = job.tenant_id.clone();
+        task_instance.caller_context = job.caller_context.clone();
+        task_instance.created_at = now;
+        task_instance.updated_at = now;
+        task_instance.input = None;
+        task_instance.output = None;
+        task_instance.error_message = None;
+        task_instance.execution_duration = None;
+        task_instance.task_status = TaskInstanceStatus::Pending;
+        task_instance
+    }
+
+    fn resolve_child_input(
+        task_template: &TaskTemplate,
+        parent: &TaskInstanceEntity,
+        job: &ExecuteTaskJob,
+        parent_node_ctx: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        match task_template {
+            TaskTemplate::Http(tpl) => {
+                Self::resolve_http_child_input(tpl, parent, job, parent_node_ctx)
+            }
+            TaskTemplate::Llm(tpl) => {
+                Self::resolve_llm_child_input(tpl, parent, job, parent_node_ctx)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) async fn ensure_task_instance_for_job(
         &self,
         instance: &WorkflowInstanceEntity,
@@ -157,65 +239,15 @@ impl PluginManager {
 
         let effective_task_id = task_id_override.unwrap_or_else(|| parent.task_id.clone());
 
-        if let Ok(existing) = task_svc
-            .get_task_instance_entity(job.task_instance_id.clone())
-            .await
-        {
-            if existing.task_status.is_terminal() {
-                warn!(
-                    task_instance_id = %job.task_instance_id,
-                    status = ?existing.task_status,
-                    "task instance in terminal state, refusing to overwrite"
-                );
-                return Ok(());
-            }
-            if existing.task_type != child_task_type {
-                warn!(
-                    task_instance_id = %job.task_instance_id,
-                    existing_type = ?existing.task_type,
-                    expected_type = ?child_task_type,
-                    "task instance has wrong task_type, correcting"
-                );
-                let mut corrected = existing;
-                corrected.task_type = child_task_type;
-                corrected.task_template = child_template;
-                corrected.task_id = effective_task_id;
-                task_svc
-                    .update_task_instance_entity(corrected)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-            }
+        if Self::try_update_existing(task_svc, job, &child_template, &child_task_type, &effective_task_id).await? {
             return Ok(());
         }
 
-        let now = chrono::Utc::now();
         let parent_node_ctx = &instance.nodes[node_index].context;
-
-        let mut task_instance: TaskInstanceEntity = parent.clone();
-        task_instance.task_template = child_template;
-        task_instance.task_type = child_task_type;
-        task_instance.id = job.task_instance_id.clone();
-        task_instance.task_id = effective_task_id;
-        task_instance.task_instance_id = job.task_instance_id.clone();
-        task_instance.tenant_id = job.tenant_id.clone();
-        task_instance.caller_context = job.caller_context.clone();
-        task_instance.created_at = now;
-        task_instance.updated_at = now;
-        task_instance.input = None;
-        task_instance.output = None;
-        task_instance.error_message = None;
-        task_instance.execution_duration = None;
-        task_instance.task_status = TaskInstanceStatus::Pending;
-
-        task_instance.input = match &task_instance.task_template {
-            TaskTemplate::Http(tpl) => {
-                Self::resolve_http_child_input(tpl, parent, job, parent_node_ctx)
-            }
-            TaskTemplate::Llm(tpl) => {
-                Self::resolve_llm_child_input(tpl, parent, job, parent_node_ctx)
-            }
-            _ => None,
-        };
+        let mut task_instance = Self::build_new_task_instance(
+            parent, child_template, child_task_type, effective_task_id, job,
+        );
+        task_instance.input = Self::resolve_child_input(&task_instance.task_template, parent, job, parent_node_ctx);
 
         task_svc
             .create_task_instance_entity(task_instance)

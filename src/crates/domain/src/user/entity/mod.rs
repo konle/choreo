@@ -29,7 +29,7 @@ impl Display for TenantRole {
 }
 
 impl TenantRole {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "TenantAdmin" => Some(TenantRole::TenantAdmin),
             "Developer" => Some(TenantRole::Developer),
@@ -95,16 +95,16 @@ mod tests {
 
     #[test]
     fn from_str_valid() {
-        assert_eq!(TenantRole::from_str("TenantAdmin"), Some(TenantRole::TenantAdmin));
-        assert_eq!(TenantRole::from_str("Developer"), Some(TenantRole::Developer));
-        assert_eq!(TenantRole::from_str("Operator"), Some(TenantRole::Operator));
-        assert_eq!(TenantRole::from_str("Viewer"), Some(TenantRole::Viewer));
+        assert_eq!(TenantRole::parse("TenantAdmin"), Some(TenantRole::TenantAdmin));
+        assert_eq!(TenantRole::parse("Developer"), Some(TenantRole::Developer));
+        assert_eq!(TenantRole::parse("Operator"), Some(TenantRole::Operator));
+        assert_eq!(TenantRole::parse("Viewer"), Some(TenantRole::Viewer));
     }
 
     #[test]
     fn from_str_invalid() {
-        assert_eq!(TenantRole::from_str("Admin"), None);
-        assert_eq!(TenantRole::from_str(""), None);
+        assert_eq!(TenantRole::parse("Admin"), None);
+        assert_eq!(TenantRole::parse(""), None);
     }
 
     #[test]

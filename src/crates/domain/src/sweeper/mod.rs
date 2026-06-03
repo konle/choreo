@@ -89,7 +89,7 @@ impl Sweeper {
                 let id = &instance.workflow_instance_id;
                 let epoch = instance.epoch;
 
-                if let Err(_) = self.workflow_instance_svc.force_clear_lock(id, epoch).await {
+                if self.workflow_instance_svc.force_clear_lock(id, epoch).await.is_err() {
                     debug!(workflow_instance_id = %id, epoch, "sweeper: CAS failed, skipping");
                     skipped_cas += 1;
                     continue;

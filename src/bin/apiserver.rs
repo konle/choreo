@@ -56,13 +56,11 @@ struct Cli {
     init: bool,
 }
 
-async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_service: &TenantService) {
-    let init = &config.init;
-
-    let admin = match user_service
-        .get_user_by_username(&init.admin_username)
-        .await
-    {
+async fn bootstrap_admin(
+    init: &workflow::config::InitConfig,
+    user_service: &UserService,
+) -> domain::user::entity::UserEntity {
+    match user_service.get_user_by_username(&init.admin_username).await {
         Ok(existing) => {
             info!(username = %init.admin_username, "super admin already exists, skipping");
             existing
@@ -82,9 +80,14 @@ async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_servic
             info!(username = %init.admin_username, user_id = %user.user_id, "created super admin");
             user
         }
-    };
+    }
+}
 
-    let tenant = match tenant_service.get_tenant(&init.default_tenant_name).await {
+async fn bootstrap_tenant(
+    init: &workflow::config::InitConfig,
+    tenant_service: &TenantService,
+) -> domain::tenant::entity::TenantEntity {
+    match tenant_service.get_tenant(&init.default_tenant_name).await {
         Ok(existing) => {
             info!(tenant = %init.default_tenant_name, "tenant already exists, skipping");
             existing
@@ -100,8 +103,15 @@ async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_servic
             info!(tenant = %init.default_tenant_name, tenant_id = %t.tenant_id, "created tenant");
             t
         }
-    };
+    }
+}
 
+async fn bootstrap_role(
+    admin: &domain::user::entity::UserEntity,
+    tenant: &domain::tenant::entity::TenantEntity,
+    init: &workflow::config::InitConfig,
+    user_service: &UserService,
+) {
     match user_service
         .get_role(&admin.user_id, &tenant.tenant_id)
         .await
@@ -117,7 +127,13 @@ async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_servic
             info!(username = %init.admin_username, tenant_id = %tenant.tenant_id, "assigned TenantAdmin role");
         }
     }
+}
 
+async fn bootstrap(config: &AppConfig, user_service: &UserService, tenant_service: &TenantService) {
+    let init = &config.init;
+    let admin = bootstrap_admin(init, user_service).await;
+    let tenant = bootstrap_tenant(init, tenant_service).await;
+    bootstrap_role(&admin, &tenant, init, user_service).await;
     info!(
         "bootstrap complete ─ username: {}, tenant: {} (id: {})",
         init.admin_username, init.default_tenant_name, tenant.tenant_id

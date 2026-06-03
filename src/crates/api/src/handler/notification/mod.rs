@@ -48,7 +48,7 @@ async fn list_notifications(
         .service
         .list_notifications(&auth.tenant_id, &auth.user_id, page, page_size)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(records)))
 }
 
@@ -60,7 +60,7 @@ async fn unread_count(
         .service
         .unread_count(&auth.tenant_id, &auth.user_id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(count)))
 }
 
@@ -73,7 +73,7 @@ async fn mark_read(
         .service
         .mark_read(&auth.tenant_id, &auth.user_id, &id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(())))
 }
 
@@ -85,6 +85,6 @@ async fn mark_all_read(
         .service
         .mark_all_read(&auth.tenant_id, &auth.user_id)
         .await
-        .map_err(|e| ApiError::internal(e))?;
+        .map_err(ApiError::internal)?;
     Ok(Json(Response::success(count)))
 }

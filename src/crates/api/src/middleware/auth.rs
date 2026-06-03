@@ -109,7 +109,7 @@ pub async fn auth_middleware(
         username: claims.username,
         is_super_admin: claims.is_super_admin,
         tenant_id,
-        role: TenantRole::from_str(&claims.role),
+        role: TenantRole::parse(&claims.role),
     };
 
     req.extensions_mut().insert(ctx);

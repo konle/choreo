@@ -67,6 +67,44 @@ impl PluginManager {
             super::workflow::make_node_payload(instance, node));
     }
 
+    async fn ensure_all_task_instances(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        node_index: usize,
+        jobs: &[ExecuteTaskJob],
+    ) -> anyhow::Result<()> {
+        for job in jobs {
+            self.ensure_task_instance_for_job(instance, node_index, job).await?;
+        }
+        Ok(())
+    }
+
+    async fn dispatch_task_jobs(
+        &self,
+        jobs: Vec<ExecuteTaskJob>,
+    ) -> anyhow::Result<()> {
+        for job in jobs {
+            if let Err(e) = self.dispatcher.dispatch_task(job.clone()).await {
+                error!(task_instance_id = %job.task_instance_id, error = %e, "failed to dispatch task");
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn dispatch_workflow_jobs(
+        &self,
+        jobs: Vec<ExecuteWorkflowJob>,
+    ) -> anyhow::Result<()> {
+        for job in jobs {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job.clone()).await {
+                error!(workflow_instance_id = %job.workflow_instance_id, error = %e, "failed to dispatch workflow");
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     async fn dispatch_all_jobs(
         &self,
         instance: &mut WorkflowInstanceEntity,
@@ -74,21 +112,9 @@ impl PluginManager {
         dispatch_jobs: Vec<ExecuteTaskJob>,
         dispatch_workflow_jobs: Vec<ExecuteWorkflowJob>,
     ) -> anyhow::Result<()> {
-        for job in &dispatch_jobs {
-            self.ensure_task_instance_for_job(instance, node_index, job).await?;
-        }
-        for job in dispatch_jobs {
-            if let Err(e) = self.dispatcher.dispatch_task(job.clone()).await {
-                error!(task_instance_id = %job.task_instance_id, error = %e, "failed to dispatch task");
-                return Err(e.into());
-            }
-        }
-        for job in dispatch_workflow_jobs {
-            if let Err(e) = self.dispatcher.dispatch_workflow(job.clone()).await {
-                error!(workflow_instance_id = %job.workflow_instance_id, error = %e, "failed to dispatch workflow");
-                return Err(e.into());
-            }
-        }
+        self.ensure_all_task_instances(instance, node_index, &dispatch_jobs).await?;
+        self.dispatch_task_jobs(dispatch_jobs).await?;
+        self.dispatch_workflow_jobs(dispatch_workflow_jobs).await?;
         Ok(())
     }
 

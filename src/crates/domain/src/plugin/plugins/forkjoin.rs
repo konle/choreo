@@ -3,8 +3,8 @@ use serde_json::{Value as JsonValue, json};
 use tracing::{debug, error};
 
 use crate::plugin::interface::{
-    ChildStatus, ContainerGatherResult, ExecutionResult, PluginExecutor, PluginInterface,
-    should_abort,
+    ChildStatus, ContainerDecision, ContainerGatherResult, ContainerOutcome, ExecutionResult,
+    PluginExecutor, PluginInterface, should_abort,
 };
 use crate::shared::job::{ExecuteTaskJob, ExecuteWorkflowJob, WorkflowCallerContext};
 use crate::task::entity::task_definition::{ParallelMode, TaskTemplate};
@@ -12,50 +12,39 @@ use crate::workflow::entity::workflow_definition::{
     NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 
+#[derive(Default)]
 pub struct ForkJoinPlugin {}
-
-enum ForkJoinDecision {
-    AllDone(ForkJoinOutcome),
-    AllDispatched,
-    NeedDispatch,
-    EarlyAbort,
-}
-
-enum ForkJoinOutcome {
-    Success,
-    Failed,
-}
 
 impl ForkJoinPlugin {
     pub fn new() -> Self {
-        Self {}
+        Self::default()
     }
 
     fn diagnose(
         total_tasks: u64,
         max_failures: Option<u32>,
         gather: &ContainerGatherResult,
-    ) -> ForkJoinDecision {
+    ) -> ContainerDecision {
         if should_abort(max_failures, gather.failed_count) {
-            return ForkJoinDecision::EarlyAbort;
+            return ContainerDecision::EarlyAbort;
         }
 
         let terminal = gather.terminal_count();
 
         if terminal == total_tasks {
             let outcome = if gather.failed_count > 0 {
-                ForkJoinOutcome::Failed
+                ContainerOutcome::Failed
             } else {
-                ForkJoinOutcome::Success
+                ContainerOutcome::Success
             };
-            return ForkJoinDecision::AllDone(outcome);
+            return ContainerDecision::AllDone(outcome);
         }
 
         if gather.not_found_count == 0 && terminal + gather.running_count == total_tasks {
-            return ForkJoinDecision::AllDispatched;
+            return ContainerDecision::AllDispatched;
         }
 
-        ForkJoinDecision::NeedDispatch
+        ContainerDecision::NeedDispatch
     }
 
     async fn gather_child_task_status(
@@ -64,7 +53,7 @@ impl ForkJoinPlugin {
         node_instance: &WorkflowNodeInstanceEntity,
         workflow_instance: &WorkflowInstanceEntity,
     ) -> anyhow::Result<ContainerGatherResult> {
-        let mut result = ContainerGatherResult::new();
+        let mut result = ContainerGatherResult::default();
 
         for (index, item) in template.tasks.iter().enumerate() {
             let child_task_id = format!(
@@ -208,11 +197,11 @@ impl PluginInterface for ForkJoinPlugin {
                 .await?;
 
         match Self::diagnose(total_tasks, template.max_failures, &gather) {
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
+            ContainerDecision::AllDone(ContainerOutcome::Success) => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::success(None))
             }
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) | ForkJoinDecision::EarlyAbort => {
+            ContainerDecision::AllDone(ContainerOutcome::Failed) | ContainerDecision::EarlyAbort => {
                 node_instance.error_message = Some(format!(
                     "ForkJoin aborted: {} failures out of {} tasks",
                     gather.failed_count, total_tasks
@@ -220,7 +209,7 @@ impl PluginInterface for ForkJoinPlugin {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::failed())
             }
-            ForkJoinDecision::AllDispatched => {
+            ContainerDecision::AllDispatched => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult {
                     status: NodeExecutionStatus::Await,
@@ -229,7 +218,7 @@ impl PluginInterface for ForkJoinPlugin {
                     jump_to_node: None,
                 })
             }
-            ForkJoinDecision::NeedDispatch => {
+            ContainerDecision::NeedDispatch => {
                 let dispatched_count = node_instance
                     .task_instance
                     .output
@@ -316,11 +305,11 @@ impl PluginInterface for ForkJoinPlugin {
                 .await?;
 
         match Self::diagnose(total_tasks, template.max_failures, &gather) {
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Success) => {
+            ContainerDecision::AllDone(ContainerOutcome::Success) => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::success(None))
             }
-            ForkJoinDecision::AllDone(ForkJoinOutcome::Failed) | ForkJoinDecision::EarlyAbort => {
+            ContainerDecision::AllDone(ContainerOutcome::Failed) | ContainerDecision::EarlyAbort => {
                 node_instance.error_message = Some(format!(
                     "ForkJoin aborted: {} failures out of {} tasks",
                     gather.failed_count, total_tasks
@@ -328,7 +317,7 @@ impl PluginInterface for ForkJoinPlugin {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult::failed())
             }
-            ForkJoinDecision::AllDispatched => {
+            ContainerDecision::AllDispatched => {
                 Self::write_output(node_instance, total_tasks, total_tasks, gather.results_map);
                 Ok(ExecutionResult {
                     status: NodeExecutionStatus::Await,
@@ -337,7 +326,7 @@ impl PluginInterface for ForkJoinPlugin {
                     jump_to_node: None,
                 })
             }
-            ForkJoinDecision::NeedDispatch => {
+            ContainerDecision::NeedDispatch => {
                 let dispatched_count = node_instance
                     .task_instance
                     .output

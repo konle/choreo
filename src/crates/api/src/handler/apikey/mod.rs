@@ -116,37 +116,46 @@ async fn exchange_token(
     })))
 }
 
-async fn create_api_key(
-    State(handler): State<Arc<ApiKeyHandler>>,
-    Extension(ctx): Extension<AuthContext>,
-    Json(req): Json<CreateApiKeyRequest>,
-) -> Result<Json<Response<CreateApiKeyResponse>>, ApiError> {
-    let role = TenantRole::from_str(&req.role)
-        .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {}", req.role)))?;
-
+fn validate_api_key_role_and_ttl(
+    role_str: &str,
+    token_ttl_secs: Option<u32>,
+) -> Result<(TenantRole, u32), ApiError> {
+    let role = TenantRole::parse(role_str)
+        .ok_or_else(|| ApiError::bad_request(format!("Invalid role: {role_str}")))?;
     if matches!(role, TenantRole::TenantAdmin) {
         return Err(ApiError::bad_request(
             "API keys cannot have TenantAdmin role",
         ));
     }
-
-    let token_ttl_secs = req.token_ttl_secs.unwrap_or(3600);
-    if !(60..=86400).contains(&token_ttl_secs) {
+    let ttl = token_ttl_secs.unwrap_or(3600);
+    if !(60..=86400).contains(&ttl) {
         return Err(ApiError::bad_request(
             "token_ttl_secs must be between 60 and 86400",
         ));
     }
+    Ok((role, ttl))
+}
 
-    let expires_at = match &req.expires_at {
-        Some(s) => Some(
+fn parse_expires_at(s: &Option<String>) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    match s {
+        Some(s) => Ok(Some(
             chrono::DateTime::parse_from_rfc3339(s)
                 .map_err(|_| {
                     ApiError::bad_request("Invalid expires_at: expected ISO 8601 / RFC3339")
                 })?
                 .with_timezone(&chrono::Utc),
-        ),
-        None => None,
-    };
+        )),
+        None => Ok(None),
+    }
+}
+
+async fn create_api_key(
+    State(handler): State<Arc<ApiKeyHandler>>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<CreateApiKeyRequest>,
+) -> Result<Json<Response<CreateApiKeyResponse>>, ApiError> {
+    let (role, token_ttl_secs) = validate_api_key_role_and_ttl(&req.role, req.token_ttl_secs)?;
+    let expires_at = parse_expires_at(&req.expires_at)?;
 
     let (entity, key) = handler
         .service

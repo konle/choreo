@@ -131,6 +131,24 @@ impl VariableService {
 
     /// Merge all variable scopes into a single JSON context.
     /// Priority (low → high): tenant vars → workflow meta vars → instance context → node context.
+    async fn collect_scope_variables(
+        &self,
+        tenant_id: &str,
+        scope: &VariableScope,
+        scope_id: &str,
+        merged: &mut serde_json::Map<String, JsonValue>,
+    ) -> Result<(), RepositoryError> {
+        let vars = self
+            .repository
+            .list_by_scope(tenant_id, scope, scope_id)
+            .await?;
+        for var in vars {
+            let val = self.to_json_value(&var)?;
+            merged.insert(var.key, val);
+        }
+        Ok(())
+    }
+
     pub async fn resolve_variables(
         &self,
         tenant_id: &str,
@@ -140,23 +158,10 @@ impl VariableService {
     ) -> Result<JsonValue, RepositoryError> {
         let mut merged = serde_json::Map::new();
 
-        let tenant_vars = self
-            .repository
-            .list_by_scope(tenant_id, &VariableScope::Tenant, tenant_id)
+        self.collect_scope_variables(tenant_id, &VariableScope::Tenant, tenant_id, &mut merged)
             .await?;
-        for var in tenant_vars {
-            let val = self.to_json_value(&var)?;
-            merged.insert(var.key, val);
-        }
-
-        let meta_vars = self
-            .repository
-            .list_by_scope(tenant_id, &VariableScope::WorkflowMeta, workflow_meta_id)
+        self.collect_scope_variables(tenant_id, &VariableScope::WorkflowMeta, workflow_meta_id, &mut merged)
             .await?;
-        for var in meta_vars {
-            let val = self.to_json_value(&var)?;
-            merged.insert(var.key, val);
-        }
 
         merge_json_into_map(&mut merged, instance_context);
         merge_json_into_map(&mut merged, node_context);

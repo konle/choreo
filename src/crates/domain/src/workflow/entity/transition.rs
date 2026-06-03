@@ -90,39 +90,37 @@ impl WorkflowInstanceEntity {
 
         let mut outbound_events = Vec::new();
 
-        if let Some(event_kind) = should_notify_parent(&old_status, &new_status) {
-            if let Some(ref parent_ctx) = self.parent_context {
-                let event = match event_kind {
-                    ChildEventKind::Revived => WorkflowEvent::ChildRevived {
-                        node_id: parent_ctx.node_id.clone(),
-                        child_id: self.workflow_instance_id.clone(),
-                    },
-                    ChildEventKind::Terminated(terminal) => {
-                        let status = match terminal {
-                            TerminalStatus::Completed => {
-                                crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success
-                            }
-                            TerminalStatus::Failed => {
-                                crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed
-                            }
-                        };
-                        WorkflowEvent::NodeCallback {
-                            node_id: parent_ctx.node_id.clone(),
-                            child_task_id: self.workflow_instance_id.clone(),
-                            status,
-                            output: Some(self.context.clone()),
-                            error_message: None,
-                            input: None,
+        if let Some(event_kind) = should_notify_parent(&old_status, &new_status) && let Some(ref parent_ctx) = self.parent_context {
+            let event = match event_kind {
+                ChildEventKind::Revived => WorkflowEvent::ChildRevived {
+                    node_id: parent_ctx.node_id.clone(),
+                    child_id: self.workflow_instance_id.clone(),
+                },
+                ChildEventKind::Terminated(terminal) => {
+                    let status = match terminal {
+                        TerminalStatus::Completed => {
+                            crate::workflow::entity::workflow_definition::NodeExecutionStatus::Success
                         }
+                        TerminalStatus::Failed => {
+                            crate::workflow::entity::workflow_definition::NodeExecutionStatus::Failed
+                        }
+                    };
+                    WorkflowEvent::NodeCallback {
+                        node_id: parent_ctx.node_id.clone(),
+                        child_task_id: self.workflow_instance_id.clone(),
+                        status,
+                        output: Some(self.context.clone()),
+                        error_message: None,
+                        input: None,
                     }
-                };
+                }
+            };
 
-                outbound_events.push(OutboundEvent {
-                    target_workflow_instance_id: parent_ctx.workflow_instance_id.clone(),
-                    target_tenant_id: self.tenant_id.clone(),
-                    event,
-                });
-            }
+            outbound_events.push(OutboundEvent {
+                target_workflow_instance_id: parent_ctx.workflow_instance_id.clone(),
+                target_tenant_id: self.tenant_id.clone(),
+                event,
+            });
         }
 
         Ok(StateTransitionResult {

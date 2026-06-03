@@ -9,6 +9,7 @@ use crate::workflow::entity::workflow_definition::{
     WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 
+#[derive(Default)]
 pub struct PausePlugin;
 
 impl PausePlugin {

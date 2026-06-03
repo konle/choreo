@@ -4,9 +4,10 @@ use tracing::{error, info};
 use crate::plugin::interface::{ExecutionResult, PluginExecutor, PluginInterface};
 use crate::shared::job::{ExecuteWorkflowJob, WorkflowCallerContext, WorkflowEvent};
 use crate::shared::workflow::TaskType;
+use crate::shared::form::Form;
 use crate::task::entity::task_definition::TaskTemplate;
 use crate::workflow::entity::workflow_definition::{
-    WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
+    NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
 use crate::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 
@@ -27,6 +28,149 @@ impl SubWorkflowPlugin {
             instance_svc,
         }
     }
+}
+
+fn rebuild_child_output(child_id: &str) -> Option<serde_json::Value> {
+    Some(serde_json::json!({ "child_workflow_instance_id": child_id }))
+}
+
+fn reevaluate_child_status(
+    child: &WorkflowInstanceEntity,
+    child_id: &str,
+    parent_id: &str,
+) -> anyhow::Result<ExecutionResult> {
+    use crate::shared::workflow::WorkflowInstanceStatus;
+    match child.status {
+        WorkflowInstanceStatus::Completed => {
+            info!(
+                parent_workflow_id = %parent_id,
+                child_workflow_id = %child_id,
+                "sub-workflow re-evaluation: child already completed"
+            );
+            Ok(ExecutionResult::success(None))
+        }
+        WorkflowInstanceStatus::Failed => {
+            info!(
+                parent_workflow_id = %parent_id,
+                child_workflow_id = %child_id,
+                "sub-workflow re-evaluation: child still failed"
+            );
+            Ok(ExecutionResult::failed())
+        }
+        _ => {
+            info!(
+                parent_workflow_id = %parent_id,
+                child_workflow_id = %child_id,
+                child_status = ?child.status,
+                "sub-workflow re-evaluation: child still running, awaiting callback"
+            );
+            Ok(ExecutionResult {
+                status: NodeExecutionStatus::Await,
+                dispatch_jobs: vec![],
+                dispatch_workflow_jobs: vec![],
+                jump_to_node: None,
+            })
+        }
+    }
+}
+
+fn build_child_context(
+    context: serde_json::Value,
+    form: &[Form],
+) -> serde_json::Value {
+    if form.is_empty() {
+        return context;
+    }
+    if let serde_json::Value::Object(mut ctx) = context {
+        for field in form {
+            ctx.insert(
+                field.key.clone(),
+                serde_json::to_value(&field.value).unwrap_or_default(),
+            );
+        }
+        serde_json::Value::Object(ctx)
+    } else {
+        context
+    }
+}
+
+async fn load_workflow_and_create_child(
+    plugin: &SubWorkflowPlugin,
+    workflow_meta_id: String,
+    workflow_version: u32,
+    form: Vec<Form>,
+    workflow_instance: &mut WorkflowInstanceEntity,
+    node_instance: &mut WorkflowNodeInstanceEntity,
+    child_depth: u32,
+) -> anyhow::Result<ExecutionResult> {
+    let workflow_entity = plugin
+        .definition_svc
+        .get_workflow_entity(workflow_meta_id.clone(), workflow_version)
+        .await
+        .map_err(|e| {
+            error!(
+                workflow_meta_id = %workflow_meta_id,
+                version = workflow_version,
+                error = %e,
+                "failed to load sub-workflow template"
+            );
+            anyhow::anyhow!("Failed to load sub-workflow template: {}", e)
+        })?;
+
+    let child_context_snapshot = build_child_context(
+        workflow_instance.context.clone(),
+        &form,
+    );
+
+    let parent_ctx = WorkflowCallerContext {
+        workflow_instance_id: workflow_instance.workflow_instance_id.clone(),
+        node_id: node_instance.node_id.clone(),
+        parent_task_instance_id: None,
+        item_index: None,
+    };
+
+    let child_instance = plugin
+        .instance_svc
+        .create_instance(
+            &workflow_instance.tenant_id,
+            &workflow_entity,
+            child_context_snapshot.clone(),
+            Some(parent_ctx),
+            child_depth,
+            workflow_instance.created_by.clone(),
+        )
+        .await
+        .map_err(|e| {
+            error!(
+                parent_workflow_id = %workflow_instance.workflow_instance_id,
+                error = %e,
+                "failed to create sub-workflow instance"
+            );
+            anyhow::anyhow!("Failed to create sub-workflow instance: {}", e)
+        })?;
+
+    info!(
+        parent_workflow_id = %workflow_instance.workflow_instance_id,
+        child_workflow_id = %child_instance.workflow_instance_id,
+        depth = child_depth,
+        "sub-workflow created"
+    );
+
+    node_instance.task_instance.input = Some(serde_json::json!({
+        "workflow_meta_id": workflow_meta_id,
+        "workflow_version": workflow_version,
+        "child_context": child_context_snapshot,
+    }));
+
+    node_instance.task_instance.output = rebuild_child_output(&child_instance.workflow_instance_id);
+
+    let job = ExecuteWorkflowJob {
+        workflow_instance_id: child_instance.workflow_instance_id,
+        tenant_id: workflow_instance.tenant_id.clone(),
+        event: WorkflowEvent::Start,
+    };
+
+    Ok(ExecutionResult::async_dispatch_workflow(job))
 }
 
 #[async_trait]
@@ -54,55 +198,19 @@ impl PluginInterface for SubWorkflowPlugin {
             .as_ref()
             .and_then(|o| o.get("child_workflow_instance_id"))
             .and_then(|v| v.as_str())
-        {
-            match self
+            && let Ok(child) = self
                 .instance_svc
                 .get_workflow_instance(existing_child_id.to_string())
                 .await
-            {
-                Ok(child) => {
-                    use crate::shared::workflow::WorkflowInstanceStatus;
-                    use crate::workflow::entity::workflow_definition::NodeExecutionStatus;
-                    return match child.status {
-                        WorkflowInstanceStatus::Completed => {
-                            info!(
-                                parent_workflow_id = %workflow_instance.workflow_instance_id,
-                                child_workflow_id = %existing_child_id,
-                                "sub-workflow re-evaluation: child already completed"
-                            );
-                            node_instance.task_instance.output = Some(serde_json::json!({
-                                "child_workflow_instance_id": existing_child_id,
-                            }));
-                            Ok(ExecutionResult::success(None))
-                        }
-                        WorkflowInstanceStatus::Failed => {
-                            info!(
-                                parent_workflow_id = %workflow_instance.workflow_instance_id,
-                                child_workflow_id = %existing_child_id,
-                                "sub-workflow re-evaluation: child still failed"
-                            );
-                            Ok(ExecutionResult::failed())
-                        }
-                        _ => {
-                            info!(
-                                parent_workflow_id = %workflow_instance.workflow_instance_id,
-                                child_workflow_id = %existing_child_id,
-                                child_status = ?child.status,
-                                "sub-workflow re-evaluation: child still running, awaiting callback"
-                            );
-                            Ok(ExecutionResult {
-                                status: NodeExecutionStatus::Await,
-                                dispatch_jobs: vec![],
-                                dispatch_workflow_jobs: vec![],
-                                jump_to_node: None,
-                            })
-                        }
-                    };
-                }
-                Err(_) => {
-                    // Child instance not found — fall through to create a new one
-                }
-            }
+        {
+            let result = reevaluate_child_status(
+                &child,
+                existing_child_id,
+                &workflow_instance.workflow_instance_id,
+            )?;
+            node_instance.task_instance.output =
+                rebuild_child_output(existing_child_id);
+            return Ok(result);
         }
 
         let child_depth = workflow_instance.depth + 1;
@@ -119,85 +227,16 @@ impl PluginInterface for SubWorkflowPlugin {
             ));
         }
 
-        let workflow_entity = self
-            .definition_svc
-            .get_workflow_entity(template.workflow_meta_id.clone(), template.workflow_version)
-            .await
-            .map_err(|e| {
-                error!(
-                    workflow_meta_id = %template.workflow_meta_id,
-                    version = template.workflow_version,
-                    error = %e,
-                    "failed to load sub-workflow template"
-                );
-                anyhow::anyhow!("Failed to load sub-workflow template: {}", e)
-            })?;
-
-        let mut child_context = workflow_instance.context.clone();
-        if !template.form.is_empty() {
-            if let serde_json::Value::Object(ref mut ctx) = child_context {
-                for field in &template.form {
-                    ctx.insert(
-                        field.key.clone(),
-                        serde_json::to_value(&field.value).unwrap_or_default(),
-                    );
-                }
-            }
-        }
-
-        let child_context_snapshot = child_context.clone();
-
-        let parent_ctx = WorkflowCallerContext {
-            workflow_instance_id: workflow_instance.workflow_instance_id.clone(),
-            node_id: node_instance.node_id.clone(),
-            parent_task_instance_id: None,
-            item_index: None,
-        };
-
-        let child_instance = self
-            .instance_svc
-            .create_instance(
-                &workflow_instance.tenant_id,
-                &workflow_entity,
-                child_context,
-                Some(parent_ctx),
-                child_depth,
-                workflow_instance.created_by.clone(),
-            )
-            .await
-            .map_err(|e| {
-                error!(
-                    parent_workflow_id = %workflow_instance.workflow_instance_id,
-                    error = %e,
-                    "failed to create sub-workflow instance"
-                );
-                anyhow::anyhow!("Failed to create sub-workflow instance: {}", e)
-            })?;
-
-        info!(
-            parent_workflow_id = %workflow_instance.workflow_instance_id,
-            child_workflow_id = %child_instance.workflow_instance_id,
-            depth = child_depth,
-            "sub-workflow created"
-        );
-
-        node_instance.task_instance.input = Some(serde_json::json!({
-            "workflow_meta_id": template.workflow_meta_id,
-            "workflow_version": template.workflow_version,
-            "child_context": child_context_snapshot,
-        }));
-
-        node_instance.task_instance.output = Some(serde_json::json!({
-            "child_workflow_instance_id": child_instance.workflow_instance_id,
-        }));
-
-        let job = ExecuteWorkflowJob {
-            workflow_instance_id: child_instance.workflow_instance_id,
-            tenant_id: workflow_instance.tenant_id.clone(),
-            event: WorkflowEvent::Start,
-        };
-
-        Ok(ExecutionResult::async_dispatch_workflow(job))
+        load_workflow_and_create_child(
+            self,
+            template.workflow_meta_id.clone(),
+            template.workflow_version,
+            template.form.clone(),
+            workflow_instance,
+            node_instance,
+            child_depth,
+        )
+        .await
     }
 
     fn plugin_type(&self) -> TaskType {

@@ -3,6 +3,7 @@ use crate::response::response::Response as ApiResponse;
 use axum::{Json, extract::Request, http::StatusCode, middleware::Next, response::Response};
 use domain::user::entity::Permission;
 
+#[allow(clippy::type_complexity)]
 pub fn require_permission(
     permission: Permission,
 ) -> impl Fn(
@@ -54,6 +55,7 @@ pub fn require_permission(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn require_super_admin() -> impl Fn(
     Request,
     Next,

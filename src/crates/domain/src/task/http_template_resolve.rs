@@ -181,10 +181,8 @@ pub fn context_with_parallel_item(
     let ptr = items_json_pointer(items_path);
     let mut base_map = instance_context.as_object().cloned().unwrap_or_default();
 
-    if let Some(JsonValue::Array(arr)) = instance_context.pointer(&ptr) {
-        if let Some(item) = arr.get(item_index) {
-            base_map.insert(item_alias.to_string(), item.clone());
-        }
+    if let Some(JsonValue::Array(arr)) = instance_context.pointer(&ptr) && let Some(item) = arr.get(item_index) {
+        base_map.insert(item_alias.to_string(), item.clone());
     }
 
     JsonValue::Object(base_map)

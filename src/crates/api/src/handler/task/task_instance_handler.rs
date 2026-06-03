@@ -73,37 +73,24 @@ pub fn routes(handler: Arc<TaskInstanceHandler>) -> Router {
     Router::new().merge(reads).merge(writes).with_state(handler)
 }
 
-async fn create_task_instance(
-    State(handler): State<Arc<TaskInstanceHandler>>,
-    Extension(auth): Extension<AuthContext>,
-    Json(req): Json<CreateTaskInstanceRequest>,
-) -> Result<Json<Response<TaskInstanceEntity>>, ApiError> {
-    let task = handler
-        .task_service
-        .get_task_entity_scoped(&auth.tenant_id, &req.task_id)
-        .await?;
-    let user_ctx = req.context.unwrap_or_else(|| json!({}));
-
-    let resolved_ctx = handler
-        .variable_service
-        .resolve_standalone_context(&auth.tenant_id, &user_ctx)
-        .await
-        .map_err(|e| {
-            warn!(error = %e, "variable resolution failed for standalone task, using raw context");
-            ApiError::internal(format!("variable resolution failed: {}", e))
-        })?;
-
-    let input = match &task.task_template {
-        TaskTemplate::Http(tpl) => Some(resolved_http_request_snapshot(tpl, &resolved_ctx)),
-        TaskTemplate::Llm(tpl) => Some(resolved_llm_request_snapshot(tpl, &resolved_ctx)),
+fn build_task_input(template: &TaskTemplate, resolved_ctx: &serde_json::Value) -> Option<serde_json::Value> {
+    match template {
+        TaskTemplate::Http(tpl) => Some(resolved_http_request_snapshot(tpl, resolved_ctx)),
+        TaskTemplate::Llm(tpl) => Some(resolved_llm_request_snapshot(tpl, resolved_ctx)),
         _ => None,
-    };
+    }
+}
 
+fn new_task_instance_entity(
+    tenant_id: String,
+    task: &domain::task::entity::task_definition::TaskEntity,
+    input: Option<serde_json::Value>,
+) -> TaskInstanceEntity {
     let now = Utc::now();
     let instance_id = Uuid::new_v4().to_string();
-    let entity = TaskInstanceEntity {
+    TaskInstanceEntity {
         id: Uuid::new_v4().to_string(),
-        tenant_id: auth.tenant_id,
+        tenant_id,
         task_id: task.id.clone(),
         task_name: task.name.clone(),
         task_type: task.task_type.clone(),
@@ -118,7 +105,31 @@ async fn create_task_instance(
         error_message: None,
         execution_duration: None,
         caller_context: None,
-    };
+    }
+}
+
+async fn create_task_instance(
+    State(handler): State<Arc<TaskInstanceHandler>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<CreateTaskInstanceRequest>,
+) -> Result<Json<Response<TaskInstanceEntity>>, ApiError> {
+    let task = handler
+        .task_service
+        .get_task_entity_scoped(&auth.tenant_id, &req.task_id)
+        .await?;
+
+    let user_ctx = req.context.unwrap_or_else(|| json!({}));
+    let resolved_ctx = handler
+        .variable_service
+        .resolve_standalone_context(&auth.tenant_id, &user_ctx)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "variable resolution failed for standalone task, using raw context");
+            ApiError::internal(format!("variable resolution failed: {e}"))
+        })?;
+
+    let input = build_task_input(&task.task_template, &resolved_ctx);
+    let entity = new_task_instance_entity(auth.tenant_id, &task, input);
     let result = handler.service.create_task_instance_entity(entity).await?;
     Ok(Json(Response::success(result)))
 }

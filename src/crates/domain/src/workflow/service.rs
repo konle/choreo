@@ -10,12 +10,11 @@ struct NodeValidation {
     is_container: bool,
 }
 
-fn validate_node_for_retry_or_skip(
+fn find_validated_node_index(
     instance: &WorkflowInstanceEntity,
     node_id: &str,
-    child_task_id: Option<&str>,
     operation: &str,
-) -> Result<NodeValidation, String> {
+) -> Result<usize, String> {
     if instance.get_current_node() != node_id {
         return Err("node_id must match current_node".to_string());
     }
@@ -28,18 +27,38 @@ fn validate_node_for_retry_or_skip(
             operation, operation
         ));
     }
-    let is_container = matches!(node.node_type, TaskType::Parallel | TaskType::ForkJoin);
+    Ok(idx)
+}
+
+fn validate_container_child(
+    instance: &WorkflowInstanceEntity,
+    node_id: &str,
+    child_task_id: Option<&str>,
+    operation: &str,
+) -> Result<(), String> {
+    let cid = child_task_id.ok_or_else(|| {
+        format!("child_task_id is required when {operation} a Parallel/ForkJoin child task")
+    })?;
+    let prefix = format!("{}-{}-", instance.workflow_instance_id, node_id);
+    if !cid.starts_with(&prefix) {
+        return Err(format!(
+            "child_task_id '{}' does not belong to container node '{}'",
+            cid, node_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_node_for_retry_or_skip(
+    instance: &WorkflowInstanceEntity,
+    node_id: &str,
+    child_task_id: Option<&str>,
+    operation: &str,
+) -> Result<NodeValidation, String> {
+    let idx = find_validated_node_index(instance, node_id, operation)?;
+    let is_container = matches!(instance.nodes[idx].node_type, TaskType::Parallel | TaskType::ForkJoin);
     if is_container {
-        let cid = child_task_id.ok_or_else(|| {
-            format!("child_task_id is required when {operation} a Parallel/ForkJoin child task")
-        })?;
-        let prefix = format!("{}-{}-", instance.workflow_instance_id, node_id);
-        if !cid.starts_with(&prefix) {
-            return Err(format!(
-                "child_task_id '{}' does not belong to container node '{}'",
-                cid, node_id
-            ));
-        }
+        validate_container_child(instance, node_id, child_task_id, operation)?;
     }
     Ok(NodeValidation { idx, is_container })
 }
@@ -165,10 +184,7 @@ impl WorkflowDefinitionService {
             .get_workflow_entity(workflow_meta_id.to_string(), version)
             .await?;
         if workflow_entity.status != WorkflowStatus::Published {
-            return Err(format!(
-                "cannot copy workflow template: workflow template is not published",
-            )
-            .into());
+            return Err("cannot copy workflow template: workflow template is not published".into());
         }
         info!("max_version: {}", max_version);
         let new_workflow_entity = WorkflowEntity {
@@ -559,13 +575,11 @@ impl WorkflowInstanceService {
             .nodes
             .iter_mut()
             .find(|n| n.node_id == current_node_id)
-        {
-            if node.status == NodeExecutionStatus::Failed {
-                node.status = NodeExecutionStatus::Pending;
-                node.error_message = None;
-                node.task_instance.output = None;
-                node.task_instance.error_message = None;
-            }
+            && node.status == NodeExecutionStatus::Failed {
+            node.status = NodeExecutionStatus::Pending;
+            node.error_message = None;
+            node.task_instance.output = None;
+            node.task_instance.error_message = None;
         }
 
         self.repository.save_workflow_instance(&instance).await?;
@@ -739,7 +753,7 @@ impl WorkflowInstanceService {
 
     async fn retry_container_child(
         &self,
-        mut inst: WorkflowInstanceEntity,
+        inst: WorkflowInstanceEntity,
         cid: &str,
         workflow_instance_id: &str,
     ) -> Result<WorkflowInstanceEntity, String> {
@@ -765,35 +779,51 @@ impl WorkflowInstanceService {
         self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
     }
 
+    fn validate_node_for_retry(
+        inst: &WorkflowInstanceEntity,
+        idx: usize,
+    ) -> Result<(), String> {
+        if !matches!(inst.status, WorkflowInstanceStatus::Failed) {
+            return Err(format!("workflow instance must be Failed to retry atomic node, got {:?}", inst.status));
+        }
+        if !matches!(inst.nodes[idx].status, NodeExecutionStatus::Failed) {
+            return Err(format!("node must be Failed to retry, got {:?}", inst.nodes[idx].status));
+        }
+        Ok(())
+    }
+
+    async fn save_and_dispatch_retry(
+        &self,
+        inst: &mut WorkflowInstanceEntity,
+        workflow_instance_id: &str,
+    ) -> Result<(), String> {
+        let transition = inst.transition_status(WorkflowInstanceStatus::Pending).map_err(|e| e.to_string())?;
+        self.save_workflow_instance(inst).await.map_err(|e| e.to_string())?;
+        for job in transition.into_dispatch_jobs() {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                warn!(workflow_instance_id = %workflow_instance_id, error = %e, "failed to dispatch");
+            }
+        }
+        Ok(())
+    }
+
     async fn retry_atomic_node(
         &self,
         inst: &mut WorkflowInstanceEntity,
         idx: usize,
         workflow_instance_id: &str,
     ) -> Result<WorkflowInstanceEntity, String> {
-        let node = &inst.nodes[idx];
-        if !matches!(inst.status, WorkflowInstanceStatus::Failed) {
-            return Err(format!("workflow instance must be Failed to retry atomic node, got {:?}", inst.status));
-        }
-        if !matches!(node.status, NodeExecutionStatus::Failed) {
-            return Err(format!("node must be Failed to retry, got {:?}", node.status));
-        }
         let task_id = inst.nodes[idx].task_instance.task_instance_id.clone();
         if let Err(e) = self.task_instance_svc.retry_instance(&task_id).await {
             warn!(task_instance_id = %task_id, error = %e, "failed to CAS reset task_instance for retry");
         }
+        Self::validate_node_for_retry(inst, idx)?;
         inst.nodes[idx].status = NodeExecutionStatus::Pending;
         inst.nodes[idx].error_message = None;
         inst.nodes[idx].task_instance.output = None;
         inst.nodes[idx].task_instance.error_message = None;
         inst.nodes[idx].updated_at = Utc::now();
-        let transition_result = inst.transition_status(WorkflowInstanceStatus::Pending).map_err(|e| e)?;
-        self.save_workflow_instance(inst).await.map_err(|e| e.to_string())?;
-        for job in transition_result.into_dispatch_jobs() {
-            if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
-                warn!(workflow_instance_id = %workflow_instance_id, error = %e, "failed to dispatch");
-            }
-        }
+        self.save_and_dispatch_retry(inst, workflow_instance_id).await?;
         self.get_workflow_instance(workflow_instance_id.to_string()).await.map_err(|e| e.to_string())
     }
 

@@ -98,10 +98,8 @@ impl ApprovalService {
             .resolve_approvers(tenant_id, &template.approvers, context)
             .await?;
 
-        if template.self_approval == SelfApprovalPolicy::Skip {
-            if let Some(ref uid) = applicant_id {
-                approvers.retain(|id| id != uid);
-            }
+        if template.self_approval == SelfApprovalPolicy::Skip && let Some(ref uid) = applicant_id {
+            approvers.retain(|id| id != uid);
         }
 
         if approvers.is_empty() {
@@ -143,7 +141,7 @@ impl ApprovalService {
         let mut entity = self.repository.get_by_id(tenant_id, approval_id).await?;
 
         validate_can_decide(&entity, user_id)
-            .map_err(|msg| RepositoryError::from(msg))?;
+            .map_err(|e| -> RepositoryError { e.into() })?;
 
         entity.decisions.push(ApprovalDecision {
             user_id: user_id.to_string(),
@@ -201,6 +199,60 @@ impl ApprovalService {
         evaluate_approval_mode(&entity.approval_mode, entity.approvers.len(), &entity.decisions)
     }
 
+    fn resolve_user_rule(
+        user_ids: &mut Vec<String>,
+        uid: &str,
+    ) {
+        if !user_ids.iter().any(|x| x == uid) {
+            user_ids.push(uid.to_string());
+        }
+    }
+
+    async fn resolve_role_rule(
+        &self,
+        tenant_id: &str,
+        role_name: &str,
+        user_ids: &mut Vec<String>,
+    ) -> Result<(), RepositoryError> {
+        let role_entities = self
+            .role_repository
+            .list_users_by_role(tenant_id, role_name)
+            .await?;
+        for r in role_entities {
+            if !user_ids.contains(&r.user_id) {
+                user_ids.push(r.user_id);
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_context_variable_rule(
+        context: &serde_json::Value,
+        var_name: &str,
+        user_ids: &mut Vec<String>,
+    ) {
+        if let Some(val) = context.get(var_name) {
+            match val {
+                serde_json::Value::String(s) => {
+                    if !user_ids.contains(s) {
+                        user_ids.push(s.clone());
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            let owned = s.to_string();
+                            if !user_ids.contains(&owned) {
+                                user_ids.push(owned);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn resolve_approvers(
         &self,
         tenant_id: &str,
@@ -211,44 +263,9 @@ impl ApprovalService {
 
         for rule in rules {
             match rule {
-                ApproverRule::User(uid) => {
-                    if !user_ids.contains(uid) {
-                        user_ids.push(uid.clone());
-                    }
-                }
-                ApproverRule::Role(role_name) => {
-                    let role_entities = self
-                        .role_repository
-                        .list_users_by_role(tenant_id, role_name)
-                        .await?;
-                    for r in role_entities {
-                        if !user_ids.contains(&r.user_id) {
-                            user_ids.push(r.user_id);
-                        }
-                    }
-                }
-                ApproverRule::ContextVariable(var_name) => {
-                    if let Some(val) = context.get(var_name) {
-                        match val {
-                            serde_json::Value::String(s) => {
-                                if !user_ids.contains(s) {
-                                    user_ids.push(s.clone());
-                                }
-                            }
-                            serde_json::Value::Array(arr) => {
-                                for item in arr {
-                                    if let Some(s) = item.as_str() {
-                                        let owned = s.to_string();
-                                        if !user_ids.contains(&owned) {
-                                            user_ids.push(owned);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                ApproverRule::User(uid) => Self::resolve_user_rule(&mut user_ids, uid),
+                ApproverRule::Role(role_name) => self.resolve_role_rule(tenant_id, role_name, &mut user_ids).await?,
+                ApproverRule::ContextVariable(var_name) => Self::resolve_context_variable_rule(context, var_name, &mut user_ids),
             }
         }
 

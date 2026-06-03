@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum WorkflowEvent {
+    #[default]
     Start,
     NodeCallback { // FixedMe: 完全事件化之后 这个数据结构就可以简化了。因为工作流会从DB收集。
         node_id: String,
@@ -22,11 +23,6 @@ pub enum WorkflowEvent {
     },
 }
 
-impl Default for WorkflowEvent {
-    fn default() -> Self {
-        WorkflowEvent::Start
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteWorkflowJob {

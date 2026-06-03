@@ -183,7 +183,7 @@ pub enum ChildStatus {
 }
 
 /// Gathered status of all children in a container plugin (ForkJoin / Parallel).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ContainerGatherResult {
     pub completed_count: u64,
     pub failed_count: u64,
@@ -194,17 +194,6 @@ pub struct ContainerGatherResult {
 }
 
 impl ContainerGatherResult {
-    pub fn new() -> Self {
-        Self {
-            completed_count: 0,
-            failed_count: 0,
-            skipped_count: 0,
-            running_count: 0,
-            not_found_count: 0,
-            results_map: serde_json::Map::new(),
-        }
-    }
-
     pub fn terminal_count(&self) -> u64 {
         self.completed_count + self.failed_count
     }

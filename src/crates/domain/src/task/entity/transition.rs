@@ -121,23 +121,21 @@ impl TaskInstanceEntity {
 
         let mut outbound_events = Vec::new();
 
-        if let Some(event_kind) = should_notify_parent_task(&old_status, &new_status) {
-            if let Some(ref caller_ctx) = self.caller_context {
-                let event = build_workflow_event_for_task(
-                    &event_kind,
-                    caller_ctx,
-                    &self.task_instance_id,
-                    self.output.clone(),
-                    self.error_message.clone(),
-                    self.input.clone(),
-                );
+        if let Some(event_kind) = should_notify_parent_task(&old_status, &new_status) && let Some(ref caller_ctx) = self.caller_context {
+            let event = build_workflow_event_for_task(
+                &event_kind,
+                caller_ctx,
+                &self.task_instance_id,
+                self.output.clone(),
+                self.error_message.clone(),
+                self.input.clone(),
+            );
 
-                outbound_events.push(TaskOutboundEvent {
-                    target_workflow_instance_id: caller_ctx.workflow_instance_id.clone(),
-                    target_tenant_id: self.tenant_id.clone(),
-                    event,
-                });
-            }
+            outbound_events.push(TaskOutboundEvent {
+                target_workflow_instance_id: caller_ctx.workflow_instance_id.clone(),
+                target_tenant_id: self.tenant_id.clone(),
+                event,
+            });
         }
 
         Ok(TaskTransitionResult {

@@ -12,13 +12,14 @@ use super::loop_action::LoopAction;
 use crate::plugin::interface::{ExecutionResult, PluginExecutor};
 use crate::shared::job::{ExecuteWorkflowJob, WorkflowEvent};
 use crate::shared::workflow::{TaskInstanceStatus, WorkflowInstanceStatus};
-use crate::task::entity::task_definition::TaskTemplate;
+use crate::task::entity::task_definition::{TaskInstanceEntity, TaskTemplate};
 use crate::task::http_template_resolve::{
     resolved_http_request_snapshot,
 };
 use crate::workflow::entity::workflow_definition::{
     NodeExecutionStatus, WorkflowInstanceEntity, WorkflowNodeInstanceEntity,
 };
+use crate::workflow::service::WorkflowInstanceService;
 use crate::workflow::resolution_context::augment_merged_context_with_nodes;
 use tracing::{debug, error, info, warn};
 
@@ -88,15 +89,6 @@ fn child_task_status_to_node_status(
         }
         _ => None,
     }
-}
-
-fn is_container_node(
-    node: &crate::workflow::entity::workflow_definition::WorkflowNodeInstanceEntity,
-) -> bool {
-    matches!(
-        node.node_type,
-        crate::shared::workflow::TaskType::Parallel | crate::shared::workflow::TaskType::ForkJoin
-    )
 }
 
 impl PluginManager {
@@ -449,28 +441,21 @@ impl PluginManager {
             .map(|s| s == "Failed")
             .unwrap_or(false);
 
-        if was_failed {
-            if let Some(fc) = state.get("failed_count").and_then(|v| v.as_u64()) {
-                state["failed_count"] = serde_json::json!(fc.saturating_sub(1));
-            }
+        if was_failed && let Some(fc) = state.get("failed_count").and_then(|v| v.as_u64()) {
+            state["failed_count"] = serde_json::json!(fc.saturating_sub(1));
         }
 
         // Reset results entry
-        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) {
-            if results.contains_key(child_id) {
-                results.insert(child_id.to_string(), serde_json::Value::Null);
-            }
+        if let Some(results) = state.get_mut("results").and_then(|r| r.as_object_mut()) && results.contains_key(child_id) {
+            results.insert(child_id.to_string(), serde_json::Value::Null);
         }
     }
 
-    /// Handle RetryContainerChild event: rollback container state and recover parent status.
-    ///
-    /// Executed by Worker under lock. The child TaskInstance has already been reset to Pending
-    /// and dispatched by the API layer. This handler only modifies the parent workflow instance.
-    async fn on_retry_container_child(
+    /// Rollback container state and transition Failed→Pending, dispatching Start.
+    async fn handle_retry_failed_status(
         &self,
-        workflow_instance_id: &str,
         instance: &mut WorkflowInstanceEntity,
+        workflow_instance_id: &str,
         node_id: &str,
         child_task_id: &str,
     ) -> anyhow::Result<()> {
@@ -478,74 +463,64 @@ impl PluginManager {
             .nodes
             .iter_mut()
             .find(|n| n.node_id == node_id)
-            .ok_or_else(|| anyhow::anyhow!("RetryContainerChild: node {} not found", node_id))?;
+            .unwrap();
+        node.status = NodeExecutionStatus::Pending;
+        node.error_message = None;
 
-        Self::rollback_child_in_container(node, child_task_id);
+        let transition_result = instance
+            .transition_status(WorkflowInstanceStatus::Pending)
+            .map_err(|e| anyhow::anyhow!("RetryContainerChild transition: {}", e))?;
 
-        match instance.status {
-            WorkflowInstanceStatus::Failed => {
-                let node = instance
-                    .nodes
-                    .iter_mut()
-                    .find(|n| n.node_id == node_id)
-                    .unwrap();
-                node.status =
-                    crate::workflow::entity::workflow_definition::NodeExecutionStatus::Pending;
-                node.error_message = None;
+        self.save_instance_and_bump_epoch(instance).await?;
 
-                let transition_result = instance
-                    .transition_status(WorkflowInstanceStatus::Pending)
-                    .map_err(|e| anyhow::anyhow!("RetryContainerChild transition: {}", e))?;
-
-                self.save_instance_and_bump_epoch(instance).await?;
-
-                for job in transition_result.into_dispatch_jobs() {
-                    if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
-                        warn!(
-                            workflow_instance_id = %workflow_instance_id,
-                            error = %e,
-                            "RetryContainerChild: failed to dispatch ChildRevived to grandparent"
-                        );
-                    }
-                }
-
-                info!(
+        for job in transition_result.into_dispatch_jobs() {
+            if let Err(e) = self.dispatcher.dispatch_workflow(job).await {
+                warn!(
                     workflow_instance_id = %workflow_instance_id,
-                    node_id = %node_id,
-                    child_task_id = %child_task_id,
-                    "RetryContainerChild: Failed→Pending, dispatching Start"
-                );
-                self.dispatcher
-                    .dispatch_workflow(crate::shared::job::ExecuteWorkflowJob {
-                        workflow_instance_id: workflow_instance_id.to_string(),
-                        tenant_id: instance.tenant_id.clone(),
-                        event: crate::shared::job::WorkflowEvent::Start,
-                    })
-                    .await?;
-            }
-            WorkflowInstanceStatus::Await
-            | WorkflowInstanceStatus::Pending
-            | WorkflowInstanceStatus::Running => {
-                self.save_instance_and_bump_epoch(instance).await?;
-                debug!(
-                    workflow_instance_id = %workflow_instance_id,
-                    node_id = %node_id,
-                    child_task_id = %child_task_id,
-                    status = ?instance.status,
-                    "RetryContainerChild: rollback only (parent not Failed)"
-                );
-            }
-            _ => {
-                debug!(
-                    workflow_instance_id = %workflow_instance_id,
-                    status = ?instance.status,
-                    "RetryContainerChild ignored: terminal state"
+                    error = %e,
+                    "RetryContainerChild: failed to dispatch ChildRevived to grandparent"
                 );
             }
         }
 
-        // Proactive check: if the child task already finished (extreme timing),
-        // supplement the callback that may have been lost
+        info!(
+            workflow_instance_id = %workflow_instance_id,
+            node_id = %node_id,
+            child_task_id = %child_task_id,
+            "RetryContainerChild: Failed→Pending, dispatching Start"
+        );
+        self.dispatcher
+            .dispatch_workflow(crate::shared::job::ExecuteWorkflowJob {
+                workflow_instance_id: workflow_instance_id.to_string(),
+                tenant_id: instance.tenant_id.clone(),
+                event: crate::shared::job::WorkflowEvent::Start,
+            })
+            .await
+    }
+
+    /// Save after rollback when parent is not Failed.
+    async fn handle_retry_non_failed_status(
+        &self,
+        instance: &mut WorkflowInstanceEntity,
+        workflow_instance_id: &str,
+    ) -> anyhow::Result<()> {
+        self.save_instance_and_bump_epoch(instance).await?;
+        debug!(
+            workflow_instance_id = %workflow_instance_id,
+            status = ?instance.status,
+            "RetryContainerChild: rollback only (parent not Failed)"
+        );
+        Ok(())
+    }
+
+    /// After rollback, check if child already finished; if so, dispatch a supplemental callback.
+    async fn proactive_child_check(
+        &self,
+        workflow_instance_id: &str,
+        node_id: &str,
+        child_task_id: &str,
+        instance: &WorkflowInstanceEntity,
+    ) {
         let child_result = match &self.task_instance_svc {
             Some(svc) => svc
                 .get_task_instance_entity(child_task_id.to_string())
@@ -555,7 +530,6 @@ impl PluginManager {
         };
         if let Some(child) = child_result {
             let terminal_status = child_task_status_to_node_status(&child.task_status);
-
             if let Some(status) = terminal_status {
                 info!(
                     workflow_instance_id = %workflow_instance_id,
@@ -580,6 +554,37 @@ impl PluginManager {
                     .await;
             }
         }
+    }
+
+    /// Handle RetryContainerChild event: rollback container state and recover parent status.
+    ///
+    /// Executed by Worker under lock. The child TaskInstance has already been reset to Pending
+    /// and dispatched by the API layer. This handler only modifies the parent workflow instance.
+    async fn on_retry_container_child(
+        &self,
+        workflow_instance_id: &str,
+        instance: &mut WorkflowInstanceEntity,
+        node_id: &str,
+        child_task_id: &str,
+    ) -> anyhow::Result<()> {
+        let node = instance
+            .nodes
+            .iter_mut()
+            .find(|n| n.node_id == node_id)
+            .ok_or_else(|| anyhow::anyhow!("RetryContainerChild: node {} not found", node_id))?;
+
+        Self::rollback_child_in_container(node, child_task_id);
+
+        if matches!(instance.status, WorkflowInstanceStatus::Failed) {
+            self.handle_retry_failed_status(instance, workflow_instance_id, node_id, child_task_id)
+                .await?;
+        } else {
+            self.handle_retry_non_failed_status(instance, workflow_instance_id)
+                .await?;
+        }
+
+        self.proactive_child_check(workflow_instance_id, node_id, child_task_id, instance)
+            .await;
 
         Ok(())
     }
@@ -588,6 +593,23 @@ impl PluginManager {
     ///
     /// Returns `Ignored` if the callback targets a node that is no longer the current node
     /// (stale/delayed callback from a previously completed node).
+    async fn transition_to_ready(
+        svc: &WorkflowInstanceService,
+        instance: &mut WorkflowInstanceEntity,
+    ) -> anyhow::Result<()> {
+        if matches!(instance.status, WorkflowInstanceStatus::Await | WorkflowInstanceStatus::Suspended) {
+            svc.transition_instance(instance, WorkflowInstanceStatus::Pending)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        if !matches!(instance.status, WorkflowInstanceStatus::Running) {
+            svc.transition_instance(instance, WorkflowInstanceStatus::Running)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Ok(())
+    }
+
     async fn prepare_instance_for_node_callback(
         &self,
         instance: &mut WorkflowInstanceEntity,
@@ -604,39 +626,13 @@ impl PluginManager {
         }
 
         match instance.status {
-            WorkflowInstanceStatus::Await => {
-                self.workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Pending)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                self.workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Running)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
+            WorkflowInstanceStatus::Await
+            | WorkflowInstanceStatus::Suspended
+            | WorkflowInstanceStatus::Pending
+            | WorkflowInstanceStatus::Running => {
+                Self::transition_to_ready(&self.workflow_instance_svc, instance).await?;
                 Ok(CallbackReadiness::Ready)
             }
-            WorkflowInstanceStatus::Suspended => {
-                self.workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Pending)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                self.workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Running)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                Ok(CallbackReadiness::Ready)
-            }
-            WorkflowInstanceStatus::Pending => {
-                self.workflow_instance_svc
-                    .transition_instance(instance, WorkflowInstanceStatus::Running)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-
-                Ok(CallbackReadiness::Ready)
-            }
-            WorkflowInstanceStatus::Running => Ok(CallbackReadiness::Ready),
             _ => {
                 debug!(
                     workflow_instance_id = %instance.workflow_instance_id,
@@ -645,6 +641,33 @@ impl PluginManager {
                 );
                 Ok(CallbackReadiness::Ignored)
             }
+        }
+    }
+
+    fn enrich_payload_fields(
+        payload: &mut CallbackPayload,
+        task_inst: &TaskInstanceEntity,
+    ) {
+        if payload.input.is_none() {
+            payload.input = task_inst.input.clone();
+        }
+        if payload.output.is_none() {
+            payload.output = task_inst.output.clone();
+        }
+        if payload.error_message.is_none() {
+            payload.error_message = task_inst.error_message.clone();
+        }
+    }
+
+    fn derive_node_status(
+        task_status: TaskInstanceStatus,
+        default: NodeExecutionStatus,
+    ) -> NodeExecutionStatus {
+        match task_status {
+            TaskInstanceStatus::Completed => NodeExecutionStatus::Success,
+            TaskInstanceStatus::Failed | TaskInstanceStatus::Canceled => NodeExecutionStatus::Failed,
+            TaskInstanceStatus::Running => NodeExecutionStatus::Running,
+            _ => default,
         }
     }
 
@@ -664,23 +687,9 @@ impl PluginManager {
             return payload;
         };
 
-        if payload.input.is_none() {
-            payload.input = task_inst.input.clone();
-        }
-        if payload.output.is_none() {
-            payload.output = task_inst.output.clone();
-        }
-        if payload.error_message.is_none() {
-            payload.error_message = task_inst.error_message.clone();
-        }
+        Self::enrich_payload_fields(&mut payload, &task_inst);
         if !matches!(payload.status, NodeExecutionStatus::Skipped) {
-            payload.status = match task_inst.task_status {
-                TaskInstanceStatus::Completed => NodeExecutionStatus::Success,
-                TaskInstanceStatus::Failed => NodeExecutionStatus::Failed,
-                TaskInstanceStatus::Running => NodeExecutionStatus::Running,
-                TaskInstanceStatus::Canceled => NodeExecutionStatus::Failed,
-                _ => payload.status,
-            };
+            payload.status = Self::derive_node_status(task_inst.task_status, payload.status);
         }
         payload
     }
@@ -730,6 +739,29 @@ impl PluginManager {
     /// Runs forward until the instance is no longer Running, a node yields (async dispatch / suspend), or the workflow ends.
     ///
     /// Each iteration reloads from storage so we do not execute stale graph state under concurrent writers.
+    /// Run one iteration of the execution loop body.
+    /// Returns `None` when the instance is no longer running (loop should stop).
+    async fn execute_workflow_loop_iteration(
+        &self,
+        workflow_instance_id: &str,
+    ) -> anyhow::Result<Option<LoopOutcome>> {
+        let Some(mut instance) = self
+            .reload_workflow_if_running(workflow_instance_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let current_node_id = instance.get_current_node();
+        let node_index = Self::node_index_for_id(&instance, &current_node_id)?;
+        let node_status = instance.nodes[node_index].status.clone();
+
+        let outcome = self
+            .workflow_loop_tick(&mut instance, node_index, &current_node_id, node_status)
+            .await?;
+        Ok(Some(outcome))
+    }
+
     pub async fn execute_workflow_loop(
         &self,
         workflow_instance: &mut WorkflowInstanceEntity,
@@ -740,21 +772,14 @@ impl PluginManager {
                 "executing workflow loop iteration"
             );
 
-            let Some(mut instance) = self
-                .reload_workflow_if_running(&workflow_instance.workflow_instance_id)
+            let Some(outcome) = self
+                .execute_workflow_loop_iteration(&workflow_instance.workflow_instance_id)
                 .await?
             else {
                 return Ok(());
             };
 
-            let current_node_id = instance.get_current_node();
-            let node_index = Self::node_index_for_id(&instance, &current_node_id)?;
-            let node_status = instance.nodes[node_index].status.clone();
-
-            match self
-                .workflow_loop_tick(&mut instance, node_index, &current_node_id, node_status)
-                .await?
-            {
+            match outcome {
                 LoopOutcome::Continue => continue,
                 LoopOutcome::Stop => return Ok(()),
             }
@@ -861,6 +886,60 @@ impl PluginManager {
         }
     }
 
+    async fn resolve_node_variables(
+        variable_svc: Option<&crate::variable::service::VariableService>,
+        instance: &WorkflowInstanceEntity,
+        node: &mut WorkflowNodeInstanceEntity,
+    ) {
+        let Some(var_svc) = variable_svc else {
+            return;
+        };
+        match var_svc
+            .resolve_variables(
+                &instance.tenant_id,
+                &instance.workflow_meta_id,
+                &instance.context,
+                &node.context,
+            )
+            .await
+        {
+            Ok(merged) => node.context = merged,
+            Err(e) => warn!(
+                workflow_instance_id = %instance.workflow_instance_id,
+                node_id = %node.node_id,
+                error = %e,
+                "variable resolution failed, using raw context"
+            ),
+        }
+    }
+
+    fn inject_initiator_field(
+        created_by: &Option<String>,
+        context: &mut serde_json::Value,
+    ) {
+        let Some(uid) = created_by else {
+            return;
+        };
+        if let Some(obj) = context.as_object_mut() {
+            obj.insert("__initiator__".into(), serde_json::json!(uid));
+        }
+    }
+
+    fn prepare_node_task_input(
+        node: &mut WorkflowNodeInstanceEntity,
+        context: &serde_json::Value,
+    ) {
+        match &node.task_instance.task_template {
+            TaskTemplate::Http(tpl) => {
+                node.task_instance.input = Some(resolved_http_request_snapshot(tpl, context));
+            }
+            TaskTemplate::Llm(tpl) => {
+                node.task_instance.input = Some(resolved_llm_request_snapshot(tpl, context));
+            }
+            _ => {}
+        }
+    }
+
     async fn run_node(
         &self,
         instance: &mut WorkflowInstanceEntity,
@@ -868,44 +947,12 @@ impl PluginManager {
     ) -> anyhow::Result<LoopAction> {
         let mut node = instance.nodes[node_index].clone();
 
-        if let Some(ref var_svc) = self.variable_svc {
-            match var_svc
-                .resolve_variables(
-                    &instance.tenant_id,
-                    &instance.workflow_meta_id,
-                    &instance.context,
-                    &node.context,
-                )
-                .await
-            {
-                Ok(merged) => node.context = merged,
-                Err(e) => warn!(
-                    workflow_instance_id = %instance.workflow_instance_id,
-                    node_id = %node.node_id,
-                    error = %e,
-                    "variable resolution failed, using raw context"
-                ),
-            }
-        }
-
-        if let Some(ref uid) = instance.created_by {
-            if let Some(obj) = node.context.as_object_mut() {
-                obj.insert("__initiator__".into(), serde_json::json!(uid));
-            }
-        }
-
+        Self::resolve_node_variables(self.variable_svc.as_ref(), instance, &mut node).await;
+        Self::inject_initiator_field(&instance.created_by, &mut node.context);
         node.context =
             augment_merged_context_with_nodes(instance, &node.node_id, node.context.clone());
-
-        match &node.task_instance.task_template {
-            TaskTemplate::Http(tpl) => {
-                node.task_instance.input = Some(resolved_http_request_snapshot(tpl, &node.context));
-            }
-            TaskTemplate::Llm(tpl) => {
-                node.task_instance.input = Some(resolved_llm_request_snapshot(tpl, &node.context));
-            }
-            _ => {}
-        }
+        let node_context = node.context.clone();
+        Self::prepare_node_task_input(&mut node, &node_context);
 
         let result = self.execute_node_instance(&mut node, instance).await;
         instance.nodes[node_index] = node;

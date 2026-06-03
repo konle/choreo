@@ -89,6 +89,37 @@ impl NotificationService {
 
     // ── Subscription matching (§16.3.2) ──
 
+    fn collect_resource_subscribers<'a>(
+        subs: &'a [NotificationSubscription],
+        meta_id: &str,
+        user_channels: &mut std::collections::HashMap<String, Vec<NotificationChannel>>,
+    ) -> std::collections::HashSet<&'a str> {
+        let mut resource_hit = std::collections::HashSet::new();
+        for sub in subs {
+            if sub.scope == SubscriptionScope::Resource
+                && sub.resource_id.as_deref() == Some(meta_id)
+            {
+                resource_hit.insert(sub.user_id.as_str());
+                user_channels.insert(sub.user_id.clone(), sub.channels.clone());
+            }
+        }
+        resource_hit
+    }
+
+    fn collect_global_subscribers(
+        subs: &[NotificationSubscription],
+        resource_hit: &std::collections::HashSet<&str>,
+        user_channels: &mut std::collections::HashMap<String, Vec<NotificationChannel>>,
+    ) {
+        for sub in subs {
+            if sub.scope == SubscriptionScope::Global
+                && !resource_hit.contains(sub.user_id.as_str())
+            {
+                user_channels.insert(sub.user_id.clone(), sub.channels.clone());
+            }
+        }
+    }
+
     pub async fn find_recipients_for_event(
         &self,
         tenant_id: &str,
@@ -97,27 +128,14 @@ impl NotificationService {
     ) -> Result<Vec<(String, Vec<NotificationChannel>)>, RepositoryError> {
         let subs = self.sub_repo.find_matching(tenant_id, event_type).await?;
 
-        let mut user_channels: std::collections::HashMap<String, Vec<NotificationChannel>> =
-            std::collections::HashMap::new();
+        let mut user_channels = std::collections::HashMap::new();
 
-        let mut resource_hit: std::collections::HashSet<String> = std::collections::HashSet::new();
-
+        let mut resource_hit = std::collections::HashSet::new();
         if let Some(meta_id) = workflow_meta_id {
-            for sub in &subs {
-                if sub.scope == SubscriptionScope::Resource
-                    && sub.resource_id.as_deref() == Some(meta_id)
-                {
-                    resource_hit.insert(sub.user_id.clone());
-                    user_channels.insert(sub.user_id.clone(), sub.channels.clone());
-                }
-            }
+            resource_hit = Self::collect_resource_subscribers(&subs, meta_id, &mut user_channels);
         }
 
-        for sub in &subs {
-            if sub.scope == SubscriptionScope::Global && !resource_hit.contains(&sub.user_id) {
-                user_channels.insert(sub.user_id.clone(), sub.channels.clone());
-            }
-        }
+        Self::collect_global_subscribers(&subs, &resource_hit, &mut user_channels);
 
         Ok(user_channels.into_iter().collect())
     }
