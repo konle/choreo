@@ -93,6 +93,13 @@ impl Default for ListTaskInstancesParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExecuteTaskParams {
+    pub task_name: String,
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DecideApprovalParams {
     pub approval_id: String,
     pub decision: String,

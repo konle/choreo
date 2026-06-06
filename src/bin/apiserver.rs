@@ -235,8 +235,8 @@ async fn main() {
     let task_handler = Arc::new(TaskHandler::new(task_service.clone()));
     let task_instance_handler = Arc::new(TaskInstanceHandler::new(
         (*task_instance_service).clone(),
-        task_service,
-        variable_service,
+        task_service.clone(),
+        variable_service.clone(),
         dispatcher.clone(),
     ));
     let workflow_handler = Arc::new(WorkflowHandler::new(workflow_def_service.clone()));
@@ -276,8 +276,11 @@ async fn main() {
         (*auth_service).clone(),
     ));
     let task_usecase = Arc::new(TaskUsecase::new(
+        task_service.clone(),
         (*task_instance_service).clone(),
+        variable_service.clone(),
         (*auth_service).clone(),
+        dispatcher.clone(),
     ));
     let approval_usecase = Arc::new(ApprovalUsecase::new(
         approval_service,

@@ -138,6 +138,7 @@ async fn dispatch_tool_call(
         "retry_task_instance" => tool_retry_task(auth, request, server).await,
         "list_approvals" => tool_list_approvals(auth, server).await,
         "decide_approval" => tool_decide_approval(auth, request, server).await,
+        "execute_task" => tool_execute_task(auth, request, server).await,
         _ => Err(ErrorData::invalid_params(format!("unknown tool: {}", name), None)),
     }
 }
@@ -294,6 +295,17 @@ async fn tool_list_approvals(
     server: &McpServer,
 ) -> Result<CallToolResult, ErrorData> {
     let r = server.approval_usecase.list_approvals(auth).await
+        .map_err(|e| ErrorData::internal_error(e, None))?;
+    Ok(CallToolResult::success(json_content(&r)?))
+}
+
+async fn tool_execute_task(
+    auth: &application::auth::context::AuthContext,
+    request: &CallToolRequestParams,
+    server: &McpServer,
+) -> Result<CallToolResult, ErrorData> {
+    let p: workflow::ExecuteTaskParams = parse_args(&request.arguments)?;
+    let r = server.task_usecase.execute_task_by_name(auth, &p.task_name, p.context).await
         .map_err(|e| ErrorData::internal_error(e, None))?;
     Ok(CallToolResult::success(json_content(&r)?))
 }
@@ -455,6 +467,19 @@ impl ServerHandler for McpServer {
                             "comment": { "type": "string" }
                         },
                         "required": ["approval_id", "decision"]
+                    })),
+                ),
+                // Task execution
+                Tool::new(
+                    "execute_task",
+                    "Create and execute a task instance by task name",
+                    tool_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "task_name": { "type": "string", "description": "Name of the task template to execute" },
+                            "context": { "type": "object", "description": "Optional input context for the task" }
+                        },
+                        "required": ["task_name"]
                     })),
                 ),
             ],
