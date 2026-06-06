@@ -24,6 +24,8 @@ use infrastructure::queue::dispatcher::ApalisDispatcher;
 
 use application::auth::service::AuthService;
 use application::auth::token::TokenService;
+use application::usecase::approval::ApprovalUsecase;
+use application::usecase::task::TaskUsecase;
 use application::usecase::workflow::WorkflowUsecase;
 
 use domain::apikey::service::ApiKeyService;
@@ -227,7 +229,7 @@ async fn main() {
     ));
     let tenant_handler = Arc::new(TenantHandler::new(tenant_service));
     let user_handler = Arc::new(UserHandler::new(user_service));
-    let approval_handler = Arc::new(ApprovalHandler::new(approval_service, dispatcher.clone()));
+    let approval_handler = Arc::new(ApprovalHandler::new(approval_service.clone(), dispatcher.clone()));
     let apikey_handler = Arc::new(ApiKeyHandler::new(apikey_service));
     let variable_handler = Arc::new(VariableHandler::new(variable_service.clone()));
     let task_handler = Arc::new(TaskHandler::new(task_service.clone()));
@@ -270,12 +272,25 @@ async fn main() {
     let workflow_usecase = Arc::new(WorkflowUsecase::new(
         workflow_def_service,
         workflow_inst_service,
-        dispatcher,
+        dispatcher.clone(),
+        (*auth_service).clone(),
+    ));
+    let task_usecase = Arc::new(TaskUsecase::new(
+        (*task_instance_service).clone(),
+        (*auth_service).clone(),
+    ));
+    let approval_usecase = Arc::new(ApprovalUsecase::new(
+        approval_service,
         (*auth_service).clone(),
     ));
 
     // ── MCP server (port = http_port + 1) ──
-    let mcp_server = McpServer::new(auth_service, workflow_usecase);
+    let mcp_server = McpServer::new(
+        auth_service,
+        workflow_usecase,
+        task_usecase,
+        approval_usecase,
+    );
     let mcp_service = create_mcp_service(mcp_server);
     let mcp_port = config.server.port + 1;
     let mcp_addr = format!("0.0.0.0:{}", mcp_port);
