@@ -16,24 +16,43 @@ use tracing::error;
 
 use crate::tools::workflow;
 
+fn extract_bearer_token_from_extensions(
+    extensions: &rmcp::model::Extensions,
+) -> Option<String> {
+    let parts = extensions.get::<http::request::Parts>()?;
+    let header = parts.headers.get("authorization")?;
+    let value = header.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ").unwrap_or(value);
+    Some(token.to_string())
+}
+
 fn resolve_auth(
     auth_service: &AuthService,
     meta: &Meta,
+    extensions: &rmcp::model::Extensions,
 ) -> Result<application::auth::context::AuthContext, ErrorData> {
+    // 1) Try HTTP Authorization header (set by opencode remote MCP)
+    if let Some(token) = extract_bearer_token_from_extensions(extensions) {
+        return auth_service
+            .verify_token(&token)
+            .map_err(|e| ErrorData::invalid_params(format!("auth failed: {}", e), None));
+    }
+
+    // 2) Try MCP meta.authorization
     if let Some(token_value) = meta.get("authorization") {
         let token = token_value
             .as_str()
             .ok_or_else(|| ErrorData::invalid_params("invalid authorization metadata", None))?;
         let token = token.strip_prefix("Bearer ").unwrap_or(token);
-        auth_service
+        return auth_service
             .verify_token(token)
-            .map_err(|e| ErrorData::invalid_params(format!("auth failed: {}", e), None))
-    } else {
-        Err(ErrorData::invalid_params(
-            "missing authorization in MCP meta",
-            None,
-        ))
+            .map_err(|e| ErrorData::invalid_params(format!("auth failed: {}", e), None));
     }
+
+    Err(ErrorData::invalid_params(
+        "missing authorization (set Authorization header or meta.authorization)",
+        None,
+    ))
 }
 
 fn tool_schema(props: serde_json::Value) -> std::sync::Arc<rmcp::model::JsonObject> {
@@ -64,8 +83,7 @@ pub fn create_mcp_service(
 ) -> StreamableHttpService<McpServer, LocalSessionManager> {
     let session_manager = Arc::new(LocalSessionManager::default());
     let config = StreamableHttpServerConfig::default()
-        .disable_allowed_hosts()
-        .with_json_response(true);
+        .disable_allowed_hosts();
     let server = Arc::new(server);
     StreamableHttpService::new(
         move || Ok((*server).clone()),
@@ -198,7 +216,7 @@ impl ServerHandler for McpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let auth = resolve_auth(&self.auth_service, &context.meta)?;
+        let auth = resolve_auth(&self.auth_service, &context.meta, &context.extensions)?;
         dispatch_tool(&self.workflow_usecase, &auth, &request).await
     }
 }

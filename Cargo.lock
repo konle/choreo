@@ -1937,6 +1937,7 @@ dependencies = [
  "application",
  "common",
  "domain",
+ "http",
  "rmcp",
  "schemars",
  "serde",
