@@ -32,17 +32,17 @@ use domain::user::service::UserService;
 use domain::variable::service::VariableService;
 use domain::workflow::service::{WorkflowDefinitionService, WorkflowInstanceService};
 
-use api::handler::apikey::ApiKeyHandler;
-use api::handler::approval::ApprovalHandler;
-use api::handler::auth::AuthHandler;
-use api::handler::notification::NotificationHandler;
-use api::handler::subscription::SubscriptionHandler;
-use api::handler::task::{TaskHandler, TaskInstanceHandler};
-use api::handler::tenant::TenantHandler;
-use api::handler::user::UserHandler;
-use api::handler::variable::VariableHandler;
-use api::handler::workflow::{WorkflowHandler, WorkflowInstanceHandler};
-use api::router::create_router;
+use http_handler::handler::apikey::ApiKeyHandler;
+use http_handler::handler::approval::ApprovalHandler;
+use http_handler::handler::auth::AuthHandler;
+use http_handler::handler::notification::NotificationHandler;
+use http_handler::handler::subscription::SubscriptionHandler;
+use http_handler::handler::task::{TaskHandler, TaskInstanceHandler};
+use http_handler::handler::tenant::TenantHandler;
+use http_handler::handler::user::UserHandler;
+use http_handler::handler::variable::VariableHandler;
+use http_handler::handler::workflow::{WorkflowHandler, WorkflowInstanceHandler};
+use http_handler::router::create_router;
 
 use workflow::config::AppConfig;
 

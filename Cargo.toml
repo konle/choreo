@@ -7,7 +7,9 @@ edition = "2024"
 
 [workspace]
 members = [
-    "src/crates/api",
+    "src/crates/http-handler",
+    "src/crates/mcp-handler",
+    "src/crates/application",
     "src/crates/domain",
     "src/crates/infrastructure",
     "src/crates/common",
@@ -18,7 +20,8 @@ axum = "0.8.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.146"
 domain = { path = "src/crates/domain" }
-api = { path = "src/crates/api" }
+application = { path = "src/crates/application" }
+http_handler = { path = "src/crates/http-handler", package = "http-handler" }
 infrastructure = { path = "src/crates/infrastructure" }
 tokio = { version = "1.51.0", features = ["full"] }
 apalis = "0.7.4"
