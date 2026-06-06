@@ -22,6 +22,10 @@ use infrastructure::mongodb::workflow::workflow_repository_impl::{
 use infrastructure::queue::consumer;
 use infrastructure::queue::dispatcher::ApalisDispatcher;
 
+use application::auth::service::AuthService;
+use application::auth::token::TokenService;
+use application::usecase::workflow::WorkflowUsecase;
+
 use domain::apikey::service::ApiKeyService;
 use domain::approval::service::ApprovalService;
 use domain::notification::service::NotificationService;
@@ -43,6 +47,8 @@ use http_handler::handler::user::UserHandler;
 use http_handler::handler::variable::VariableHandler;
 use http_handler::handler::workflow::{WorkflowHandler, WorkflowInstanceHandler};
 use http_handler::router::create_router;
+
+use mcp_handler::server::{McpServer, create_mcp_service};
 
 use workflow::config::AppConfig;
 
@@ -233,9 +239,9 @@ async fn main() {
     ));
     let workflow_handler = Arc::new(WorkflowHandler::new(workflow_def_service.clone()));
     let workflow_instance_handler = Arc::new(WorkflowInstanceHandler::new(
-        workflow_def_service,
-        workflow_inst_service,
-        dispatcher,
+        workflow_def_service.clone(),
+        workflow_inst_service.clone(),
+        dispatcher.clone(),
     ));
 
     let notification_handler = Arc::new(NotificationHandler::new(notification_service.clone()));
@@ -257,14 +263,48 @@ async fn main() {
         subscription_handler,
     );
 
-    let addr = format!("0.0.0.0:{}", config.server.port);
-    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-        error!(addr = %addr, error = %e, "failed to bind");
+    // ── Application layer (shared by HTTP and MCP) ──
+    let token_service = TokenService::new(TokenService::jwt_secret());
+    let auth_service = Arc::new(AuthService::new(token_service));
+
+    let workflow_usecase = Arc::new(WorkflowUsecase::new(
+        workflow_def_service,
+        workflow_inst_service,
+        dispatcher,
+        (*auth_service).clone(),
+    ));
+
+    // ── MCP server (port = http_port + 1) ──
+    let mcp_server = McpServer::new(auth_service, workflow_usecase);
+    let mcp_service = create_mcp_service(mcp_server);
+    let mcp_port = config.server.port + 1;
+    let mcp_addr = format!("0.0.0.0:{}", mcp_port);
+    let mcp_fallback = axum::Router::new().fallback_service(mcp_service);
+
+    let http_addr = format!("0.0.0.0:{}", config.server.port);
+    let http_listener = TcpListener::bind(&http_addr).await.unwrap_or_else(|e| {
+        error!(addr = %http_addr, error = %e, "failed to bind HTTP");
+        std::process::exit(1);
+    });
+    let mcp_listener = TcpListener::bind(&mcp_addr).await.unwrap_or_else(|e| {
+        error!(addr = %mcp_addr, error = %e, "failed to bind MCP");
         std::process::exit(1);
     });
 
-    info!(addr = %addr, "apiserver ready");
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        error!(error = %e, "server error");
-    });
+    info!(http_addr = %http_addr, mcp_addr = %mcp_addr, "apiserver ready");
+    let http = axum::serve(http_listener, app);
+    let mcp = axum::serve(mcp_listener, mcp_fallback);
+
+    tokio::select! {
+        result = http => {
+            if let Err(e) = result {
+                error!(error = %e, "HTTP server error");
+            }
+        }
+        result = mcp => {
+            if let Err(e) = result {
+                error!(error = %e, "MCP server error");
+            }
+        }
+    }
 }

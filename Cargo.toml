@@ -22,6 +22,7 @@ serde_json = "1.0.146"
 domain = { path = "src/crates/domain" }
 application = { path = "src/crates/application" }
 http_handler = { path = "src/crates/http-handler", package = "http-handler" }
+mcp_handler = { path = "src/crates/mcp-handler", package = "mcp-handler" }
 infrastructure = { path = "src/crates/infrastructure" }
 tokio = { version = "1.51.0", features = ["full"] }
 apalis = "0.7.4"

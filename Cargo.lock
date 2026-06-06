@@ -4477,6 +4477,7 @@ dependencies = [
  "domain",
  "http-handler",
  "infrastructure",
+ "mcp-handler",
  "mongodb",
  "rand 0.10.0",
  "serde",

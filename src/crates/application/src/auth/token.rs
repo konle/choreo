@@ -2,6 +2,7 @@ use crate::auth::context::{AuthContext, Claims};
 use domain::user::entity::TenantRole;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 
+#[derive(Clone)]
 pub struct TokenService {
     secret: String,
 }

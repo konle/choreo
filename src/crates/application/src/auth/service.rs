@@ -2,6 +2,7 @@ use crate::auth::context::AuthContext;
 use crate::auth::token::TokenService;
 use domain::user::entity::Permission;
 
+#[derive(Clone)]
 pub struct AuthService {
     token_service: TokenService,
 }

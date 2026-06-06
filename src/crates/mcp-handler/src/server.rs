@@ -6,6 +6,10 @@ use rmcp::model::{
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService,
+};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::ErrorData;
 use std::sync::Arc;
 use tracing::error;
@@ -53,6 +57,21 @@ impl McpServer {
             workflow_usecase,
         }
     }
+}
+
+pub fn create_mcp_service(
+    server: McpServer,
+) -> StreamableHttpService<McpServer, LocalSessionManager> {
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let config = StreamableHttpServerConfig::default()
+        .disable_allowed_hosts()
+        .with_json_response(true);
+    let server = Arc::new(server);
+    StreamableHttpService::new(
+        move || Ok((*server).clone()),
+        session_manager,
+        config,
+    )
 }
 
 async fn dispatch_tool(
@@ -174,14 +193,12 @@ impl ServerHandler for McpServer {
         }))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + '_ {
-        async move {
-            let auth = resolve_auth(&self.auth_service, &context.meta)?;
-            dispatch_tool(&self.workflow_usecase, &auth, &request).await
-        }
+    ) -> Result<CallToolResult, ErrorData> {
+        let auth = resolve_auth(&self.auth_service, &context.meta)?;
+        dispatch_tool(&self.workflow_usecase, &auth, &request).await
     }
 }
