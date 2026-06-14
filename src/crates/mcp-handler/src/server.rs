@@ -17,6 +17,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::ErrorData;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::tools::workflow;
@@ -118,28 +120,82 @@ impl McpServer {
     }
 }
 
+type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + Send + 'a>>;
+type ToolFn = for<'a> fn(&'a application::auth::context::AuthContext, &'a CallToolRequestParams, &'a McpServer) -> ToolFuture<'a>;
+
+mod tool_handlers {
+    use super::*;
+
+    pub(super) fn cancel_workflow_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_cancel(a, r, s))
+    }
+    pub(super) fn decide_approval<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_decide_approval(a, r, s))
+    }
+    pub(super) fn execute_task<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_execute_task(a, r, s))
+    }
+    pub(super) fn execute_workflow_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_execute(a, r, s))
+    }
+    pub(super) fn get_task_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_get_task(a, r, s))
+    }
+    pub(super) fn get_workflow_definition<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_get_def(a, r, s))
+    }
+    pub(super) fn get_workflow_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_get_instance(a, r, s))
+    }
+    pub(super) fn list_approvals<'a>(a: &'a application::auth::context::AuthContext, _r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_list_approvals(a, s))
+    }
+    pub(super) fn list_task_instances<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_list_tasks(a, r, s))
+    }
+    pub(super) fn list_workflow_definitions<'a>(a: &'a application::auth::context::AuthContext, _r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_list_defs(a, s))
+    }
+    pub(super) fn list_workflow_instances<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_list_instances(a, r, s))
+    }
+    pub(super) fn retry_task_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_retry_task(a, r, s))
+    }
+    pub(super) fn retry_workflow_instance<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_retry(a, r, s))
+    }
+    pub(super) fn skip_workflow_node<'a>(a: &'a application::auth::context::AuthContext, r: &'a CallToolRequestParams, s: &'a McpServer) -> ToolFuture<'a> {
+        Box::pin(super::tool_skip_node(a, r, s))
+    }
+}
+
+static TOOLS: &[(&str, ToolFn)] = &[
+    ("cancel_workflow_instance", tool_handlers::cancel_workflow_instance as ToolFn),
+    ("decide_approval", tool_handlers::decide_approval as ToolFn),
+    ("execute_task", tool_handlers::execute_task as ToolFn),
+    ("execute_workflow_instance", tool_handlers::execute_workflow_instance as ToolFn),
+    ("get_task_instance", tool_handlers::get_task_instance as ToolFn),
+    ("get_workflow_definition", tool_handlers::get_workflow_definition as ToolFn),
+    ("get_workflow_instance", tool_handlers::get_workflow_instance as ToolFn),
+    ("list_approvals", tool_handlers::list_approvals as ToolFn),
+    ("list_task_instances", tool_handlers::list_task_instances as ToolFn),
+    ("list_workflow_definitions", tool_handlers::list_workflow_definitions as ToolFn),
+    ("list_workflow_instances", tool_handlers::list_workflow_instances as ToolFn),
+    ("retry_task_instance", tool_handlers::retry_task_instance as ToolFn),
+    ("retry_workflow_instance", tool_handlers::retry_workflow_instance as ToolFn),
+    ("skip_workflow_node", tool_handlers::skip_workflow_node as ToolFn),
+];
+
 async fn dispatch_tool_call(
     auth: &application::auth::context::AuthContext,
     request: &CallToolRequestParams,
     server: &McpServer,
 ) -> Result<CallToolResult, ErrorData> {
     let name = request.name.as_ref();
-    match name {
-        "list_workflow_instances" => tool_list_instances(auth, request, server).await,
-        "get_workflow_instance" => tool_get_instance(auth, request, server).await,
-        "execute_workflow_instance" => tool_execute(auth, request, server).await,
-        "cancel_workflow_instance" => tool_cancel(auth, request, server).await,
-        "retry_workflow_instance" => tool_retry(auth, request, server).await,
-        "skip_workflow_node" => tool_skip_node(auth, request, server).await,
-        "list_workflow_definitions" => tool_list_defs(auth, server).await,
-        "get_workflow_definition" => tool_get_def(auth, request, server).await,
-        "list_task_instances" => tool_list_tasks(auth, request, server).await,
-        "get_task_instance" => tool_get_task(auth, request, server).await,
-        "retry_task_instance" => tool_retry_task(auth, request, server).await,
-        "list_approvals" => tool_list_approvals(auth, server).await,
-        "decide_approval" => tool_decide_approval(auth, request, server).await,
-        "execute_task" => tool_execute_task(auth, request, server).await,
-        _ => Err(ErrorData::invalid_params(format!("unknown tool: {}", name), None)),
+    match TOOLS.binary_search_by_key(&name, |(n, _)| n) {
+        Ok(i) => TOOLS[i].1(auth, request, server).await,
+        Err(_) => Err(ErrorData::invalid_params(format!("unknown tool: {}", name), None)),
     }
 }
 
@@ -520,14 +576,22 @@ pub fn create_mcp_service(
 mod tests {
     use super::*;
 
-    fn known_tool_names() -> &'static [&'static str] {
+    fn all_tool_names() -> &'static [&'static str] {
         &[
-            "list_workflow_instances", "get_workflow_instance",
-            "execute_workflow_instance", "cancel_workflow_instance",
-            "retry_workflow_instance", "skip_workflow_node",
-            "list_workflow_definitions", "get_workflow_definition",
-            "list_task_instances", "get_task_instance", "retry_task_instance",
-            "list_approvals", "decide_approval",
+            "cancel_workflow_instance",
+            "decide_approval",
+            "execute_task",
+            "execute_workflow_instance",
+            "get_task_instance",
+            "get_workflow_definition",
+            "get_workflow_instance",
+            "list_approvals",
+            "list_task_instances",
+            "list_workflow_definitions",
+            "list_workflow_instances",
+            "retry_task_instance",
+            "retry_workflow_instance",
+            "skip_workflow_node",
         ]
     }
 
@@ -540,15 +604,30 @@ mod tests {
     }
 
     #[test]
-    fn test_known_tool_names_count() {
-        assert_eq!(known_tool_names().len(), 13);
+    fn test_tools_table_sorted() {
+        for i in 1..TOOLS.len() {
+            assert!(TOOLS[i - 1].0 < TOOLS[i].0, "TOOLS[{}]={} >= TOOLS[{}]={}", i - 1, TOOLS[i - 1].0, i, TOOLS[i].0);
+        }
     }
 
     #[test]
-    fn test_known_tool_names_all_found() {
-        for name in known_tool_names() {
-            assert!(known_tool_names().contains(name));
+    fn test_all_tool_names_found() {
+        for name in all_tool_names() {
+            assert!(TOOLS.binary_search_by_key(name, |(n, _)| n).is_ok(), "tool not found: {}", name);
         }
+    }
+
+    #[test]
+    fn test_unknown_tool_not_found() {
+        assert!(TOOLS.binary_search_by_key(&"nonexistent_tool", |(n, _)| n).is_err());
+    }
+
+    #[test]
+    fn test_tools_count_matches_tool_list() {
+        // list_tools() registers 15 tools (14 names + ... no, check count)
+        // Verify TOOLS has exactly 14 entries
+        assert_eq!(TOOLS.len(), 14);
+        assert_eq!(all_tool_names().len(), 14);
     }
 
     #[test]
@@ -590,8 +669,8 @@ mod tests {
     }
 
     #[test]
-    fn test_known_tool_names_are_valid() {
-        for name in known_tool_names() {
+    fn test_all_tool_names_valid_params() {
+        for name in all_tool_names() {
             assert!(!name.is_empty());
             let params = make_test_params(name, None);
             assert_eq!(params.name.as_ref(), *name);
@@ -612,14 +691,5 @@ mod tests {
     #[test]
     fn test_parse_decision_invalid() {
         assert!(parse_decision("invalid").is_err());
-    }
-
-    #[test]
-    fn test_known_tool_names_all_valid() {
-        for name in known_tool_names() {
-            assert!(!name.is_empty());
-            let params = make_test_params(name, None);
-            assert_eq!(params.name.as_ref(), *name);
-        }
     }
 }

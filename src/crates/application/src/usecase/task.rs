@@ -143,3 +143,168 @@ impl TaskUsecase {
             .map_err(|e| format!("failed to get created instance: {}", e))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::token::TokenService;
+    use common::pagination::PaginatedData;
+    use domain::shared::job::{ExecuteTaskJob, TaskDispatcher};
+    use domain::shared::workflow::{TaskInstanceStatus as TIS, TaskStatus, TaskType};
+    use domain::task::entity::query::TaskInstanceQuery;
+    use domain::task::entity::task_definition::{TaskEntity, TaskTemplate, TaskTransitionFields};
+    use domain::task::repository::{RepositoryError, TaskEntityRepository, TaskInstanceEntityRepository};
+    use domain::user::entity::TenantRole;
+    use domain::variable::entity::{VariableEntity, VariableScope};
+    use domain::variable::repository::VariableRepository;
+    use std::sync::Mutex;
+    use async_trait::async_trait;
+
+    struct MockTaskRepo {
+        tasks: Mutex<Vec<TaskEntity>>,
+    }
+
+    #[async_trait]
+    impl TaskEntityRepository for MockTaskRepo {
+        async fn create_task_entity(&self, e: TaskEntity) -> Result<TaskEntity, RepositoryError> {
+            self.tasks.lock().unwrap().push(e.clone());
+            Ok(e)
+        }
+        async fn get_task_entity(&self, _: String) -> Result<TaskEntity, RepositoryError> { unimplemented!() }
+        async fn get_task_entity_scoped(&self, _: &str, _: &str) -> Result<TaskEntity, RepositoryError> { unimplemented!() }
+        async fn list_task_entities(&self, _: &str) -> Result<Vec<TaskEntity>, RepositoryError> {
+            Ok(self.tasks.lock().unwrap().clone())
+        }
+        async fn list_task_entities_by_type(&self, _: &str, _: &str) -> Result<Vec<TaskEntity>, RepositoryError> { unimplemented!() }
+        async fn update_task_entity(&self, _: TaskEntity) -> Result<TaskEntity, RepositoryError> { unimplemented!() }
+        async fn delete_task_entity(&self, _: &str, _: &str) -> Result<(), RepositoryError> { unimplemented!() }
+    }
+
+    impl MockTaskRepo {
+        fn new(tasks: Vec<TaskEntity>) -> Self { Self { tasks: Mutex::new(tasks) } }
+    }
+
+    struct MockTaskInstanceRepo {
+        instances: Mutex<Vec<TaskInstanceEntity>>,
+    }
+
+    #[async_trait]
+    impl TaskInstanceEntityRepository for MockTaskInstanceRepo {
+        async fn create_task_instance_entity(&self, inst: TaskInstanceEntity) -> Result<TaskInstanceEntity, RepositoryError> {
+            self.instances.lock().unwrap().push(inst.clone());
+            Ok(inst)
+        }
+        async fn get_task_instance_entity(&self, id: String) -> Result<TaskInstanceEntity, RepositoryError> {
+            self.instances.lock().unwrap().iter().find(|i| i.task_instance_id == id).cloned().ok_or_else(|| "not found".into())
+        }
+        async fn get_task_instance_entity_scoped(&self, _: &str, _: &str) -> Result<TaskInstanceEntity, RepositoryError> { unimplemented!() }
+        async fn list_task_instance_entities(&self, _: &TaskInstanceQuery) -> Result<PaginatedData<TaskInstanceEntity>, RepositoryError> { unimplemented!() }
+        async fn update_task_instance_entity(&self, _: TaskInstanceEntity) -> Result<TaskInstanceEntity, RepositoryError> { unimplemented!() }
+        async fn transfer_status_with_fields(&self, _: &str, _: &TIS, _: &TIS, _: TaskTransitionFields) -> Result<TaskInstanceEntity, RepositoryError> { unimplemented!() }
+    }
+
+    impl MockTaskInstanceRepo {
+        fn new() -> Self { Self { instances: Mutex::new(vec![]) } }
+    }
+
+    #[derive(Clone)]
+    struct MockVariableRepo;
+
+    #[async_trait]
+    impl VariableRepository for MockVariableRepo {
+        async fn create(&self, _: &VariableEntity) -> Result<VariableEntity, RepositoryError> { unimplemented!() }
+        async fn get_by_id(&self, _: &str, _: &str) -> Result<VariableEntity, RepositoryError> { unimplemented!() }
+        async fn update(&self, _: &VariableEntity) -> Result<VariableEntity, RepositoryError> { unimplemented!() }
+        async fn delete(&self, _: &str, _: &str) -> Result<(), RepositoryError> { unimplemented!() }
+        async fn list_by_scope(&self, _: &str, _: &VariableScope, _: &str) -> Result<Vec<VariableEntity>, RepositoryError> { Ok(vec![]) }
+        async fn get_by_key(&self, _: &str, _: &VariableScope, _: &str, _: &str) -> Result<Option<VariableEntity>, RepositoryError> { unimplemented!() }
+    }
+
+    #[derive(Clone)]
+    struct MockDispatcher {
+        dispatched_tasks: Arc<Mutex<Vec<ExecuteTaskJob>>>,
+    }
+
+    #[async_trait]
+    impl TaskDispatcher for MockDispatcher {
+        async fn dispatch_task(&self, job: ExecuteTaskJob) -> anyhow::Result<()> {
+            self.dispatched_tasks.lock().unwrap().push(job);
+            Ok(())
+        }
+        async fn dispatch_workflow(&self, _: domain::shared::job::ExecuteWorkflowJob) -> anyhow::Result<()> { unimplemented!() }
+    }
+
+    impl MockDispatcher {
+        fn new() -> Self { Self { dispatched_tasks: Arc::new(Mutex::new(vec![])) } }
+    }
+
+    fn make_auth_developer() -> AuthContext {
+        AuthContext {
+            user_id: "u1".into(), username: "dev".into(),
+            is_super_admin: false, tenant_id: "t1".into(),
+            role: Some(TenantRole::Developer),
+        }
+    }
+
+    fn make_auth_viewer() -> AuthContext {
+        AuthContext {
+            user_id: "u2".into(), username: "viewer".into(),
+            is_super_admin: false, tenant_id: "t1".into(),
+            role: Some(TenantRole::Viewer),
+        }
+    }
+
+    fn make_test_task(name: &str, tenant_id: &str) -> TaskEntity {
+        TaskEntity::new(
+            format!("task-{}", name), tenant_id.into(), name.into(),
+            TaskType::Http, TaskTemplate::Grpc,
+            "desc".into(), TaskStatus::Published,
+            chrono::Utc::now(), chrono::Utc::now(), None,
+        )
+    }
+
+    fn make_usecase() -> (TaskUsecase, MockDispatcher, Arc<MockTaskRepo>) {
+        let task_repo = Arc::new(MockTaskRepo::new(vec![]));
+        let ti_repo: Arc<dyn TaskInstanceEntityRepository> = Arc::new(MockTaskInstanceRepo::new());
+        let var_repo: Arc<dyn VariableRepository> = Arc::new(MockVariableRepo);
+        let auth_service = AuthService::new(TokenService::new("test_secret".into()));
+        let dispatcher = MockDispatcher::new();
+        let usecase = TaskUsecase::new(
+            TaskService::new(task_repo.clone()),
+            TaskInstanceService::new(ti_repo),
+            VariableService::new(var_repo, "enc_key_32_bytes_long_enough!!".into()),
+            auth_service,
+            Arc::new(dispatcher.clone()),
+        );
+        (usecase, dispatcher, task_repo)
+    }
+
+    #[tokio::test]
+    async fn execute_task_by_name_success() {
+        let (usecase, dispatcher, task_repo) = make_usecase();
+        task_repo.tasks.lock().unwrap().push(make_test_task("myhttp", "t1"));
+
+        let result = usecase.execute_task_by_name(&make_auth_developer(), "myhttp", None).await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+        let instance = result.unwrap();
+        assert_eq!(instance.task_name, "myhttp");
+        assert_eq!(instance.task_status, TIS::Pending);
+        assert_eq!(dispatcher.dispatched_tasks.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_task_by_name_permission_denied() {
+        let (usecase, _dispatcher, _repo) = make_usecase();
+        let result = usecase.execute_task_by_name(&make_auth_viewer(), "myhttp", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("insufficient permissions"));
+    }
+
+    #[tokio::test]
+    async fn execute_task_by_name_not_found() {
+        let (usecase, _dispatcher, _repo) = make_usecase();
+        let result = usecase.execute_task_by_name(&make_auth_developer(), "nonexistent", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("task not found"));
+    }
+}
